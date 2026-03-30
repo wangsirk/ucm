@@ -1,0 +1,4 @@
+[2026-02-27 17:38:01.630225][UC][I] Logger initialized successfully [183386,183386][__init__.py:48,<module>]
+[2026-02-27 17:38:01.631482][UC][W] vLLM is not installed [183386,183386][apply_patch.py:104,get_vllm_version]
+[2026-02-27 17:38:01.635742][UC][E] Failed(2, 2) to open file(uc_shm_cache_97200bbf7680904a). [183386,183386][trans_buffer.cc:375,Setup]
+[2026-02-27 17:38:01.635772][UC][E] Failed(2, 2) to setup buffer manager. [183386,183386][cache_store.cc:50,Setup]

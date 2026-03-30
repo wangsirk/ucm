@@ -1,0 +1,22 @@
+# UCM 测试配置文件
+# 用于测试 /home/w2938/model 下的 Qwen2 模型
+
+# Connector 配置
+ucm_connectors:
+  - ucm_connector_name: "UcmPipelineStore"
+    ucm_connector_config:
+      store_pipeline: "Posix"
+      storage_backends: "/mnt/lustre47/ucm_cache"
+      io_direct: false
+
+# 启用指标监控（可选）
+# metrics_config_path: "/home/w2938/unified-cache-management/examples/metrics/metrics_configs.yaml"
+
+# 稀疏注意力配置（可选）
+# ucm_sparse_config:
+#   ESA:
+#     init_window_sz: 1
+#     local_window_sz: 2
+#     min_blocks: 4
+#     sparse_ratio: 0.3
+#     retrieval_stride: 5

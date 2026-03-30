@@ -1,0 +1,16 @@
+file(GLOB_RECURSE UCMMETRICS_CC_SOURCE_FILES "./cc/*.cc")
+add_library(metrics STATIC ${UCMMETRICS_CC_SOURCE_FILES})
+target_include_directories(metrics PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/cc/api
+    ${CMAKE_CURRENT_SOURCE_DIR}/cc/domain
+)
+
+file(GLOB_RECURSE UCMMETRICS_CPY_SOURCE_FILES CONFIGURE_DEPENDS "./cpy/*.cc")
+pybind11_add_module(ucmmetrics ${UCMMETRICS_CPY_SOURCE_FILES})
+target_link_libraries(ucmmetrics PRIVATE metrics)
+
+file(RELATIVE_PATH INSTALL_REL_PATH
+     ${CMAKE_SOURCE_DIR}
+     ${CMAKE_CURRENT_SOURCE_DIR}
+)
+install(TARGETS ucmmetrics LIBRARY DESTINATION ${INSTALL_REL_PATH} COMPONENT ucm)

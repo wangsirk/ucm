@@ -1,0 +1,28 @@
+{
+  "4k": {
+    "results": {
+      "scenario_name": "4K输入_128输出_128并发",
+      "total_requests": 10,
+      "successful_requests": 10,
+      "failed_requests": 0,
+      "mean_ttft": 0,
+      "p50_ttft": 0,
+      "p90_ttft": 0,
+      "p99_ttft": 0,
+      "max_ttft": 0,
+      "total_throughput": 5.196989446347311,
+      "mean_per_request_throughput": 0,
+      "kvcache_hit_rate": 0.98,
+      "total_time": 384.83818769454956,
+      "baseline_throughput": 4.442374075819623,
+      "throughput_improvement": 0.16986758828689172
+    },
+    "validations": {
+      "平均首字时延 < 10s": true,
+      "KVCache命中率 >= 98%": true,
+      "吞吐量提升 >= 50%": false,
+      "KVCache已保存到UCM存储": true
+    },
+    "kvcache_saved": true
+  }
+}

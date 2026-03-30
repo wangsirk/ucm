@@ -1,0 +1,86 @@
+# UCM Configuration for Lustre Store
+# 
+# Lustre并行文件系统KVCache存储配置
+# 
+# 使用方法：
+#   方式1: 通过环境变量指定配置文件
+#     export UCM_CONFIG_FILE=/path/to/ucm_config_lustre.yaml
+#   
+#   方式2: 在代码中指定
+#     kv_connector_extra_config={"UCM_CONFIG_FILE": "/path/to/ucm_config_lustre.yaml"}
+#
+# Lustre特性说明：
+#   - Lustre是高性能并行文件系统，适用于大规模集群
+#   - 支持条带化(Striping)以实现并行I/O
+#   - 建议配置合适的条带参数以获得最佳性能
+
+# Connector配置
+ucm_connectors:
+  - ucm_connector_name: "UcmLustreStore"
+    ucm_connector_config:
+      # Lustre挂载路径列表
+      # 可以指定多个路径实现负载均衡和故障转移
+      storage_backends:
+        - "/mnt/lustre/ucm_kvcache"
+        # - "/mnt/lustre2/ucm_kvcache"  # 可选的备用路径
+      
+      # 设备ID配置
+      # -1: 仅使用CPU，不进行GPU/NPU传输
+      # 0+: 使用指定的GPU/NPU设备
+      device_id: 0
+      
+      # 张量大小配置 (通常由模型自动计算)
+      # tensor_size: 0
+      
+      # 分片大小配置 (可选)
+      # shard_size: 0
+      
+      # 块大小配置 (可选，默认1MB)
+      # block_size: 1048576
+      
+      # IO模式配置
+      # io_direct: false - 使用缓冲IO (推荐用于大多数场景)
+      # io_direct: true  - 使用直接IO (适用于大块顺序读写)
+      io_direct: false
+      
+      # 并发配置
+      # lustre_data_trans_concurrency: 数据传输并发数 (建议值: 16-64)
+      # lustre_lookup_concurrency: 查找操作并发数 (建议值: 8-32)
+      lustre_data_trans_concurrency: 32
+      lustre_lookup_concurrency: 16
+      
+      # 超时配置 (毫秒)
+      timeout_ms: 30000
+      
+      # 数据目录分片字节数 (用于目录哈希)
+      data_dir_shard_bytes: 2
+      
+      # ===== Lustre特定配置 =====
+      
+      # 条带数量 (stripe_count)
+      # 0: 使用文件系统默认值
+      # 1: 单条带 (适用于小文件)
+      # 2+: 多条带 (适用于大文件，提高并行度)
+      # 建议: 根据OST数量和文件大小调整
+      stripe_count: 4
+      
+      # 条带大小 (stripe_size) (字节)
+      # 0: 使用文件系统默认值
+      # 建议: 1MB (1048576) 或更大
+      stripe_size: 1048576
+
+# 可选: 启用UCM指标监控
+# metrics_config_path: "/home/w2938/unified-cache-management/examples/metrics/metrics_configs.yaml"
+
+# 可选: 稀疏注意力配置 (用于长文本场景)
+# ucm_sparse_config:
+#   ESA:
+#     init_window_sz: 1
+#     local_window_sz: 2
+#     min_blocks: 4
+#     sparse_ratio: 0.3
+#     retrieval_stride: 5
+
+# 可选: 层级加载/保存配置
+# use_layerwise: true
+# hit_ratio: 0.9

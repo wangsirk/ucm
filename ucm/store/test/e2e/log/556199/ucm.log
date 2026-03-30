@@ -1,0 +1,3 @@
+[2026-03-06 13:06:39.345966][UC][I] Logger initialized successfully [556199,556199][__init__.py:48,<module>]
+[2026-03-06 13:06:39.347316][UC][W] vLLM is not installed [556199,556199][apply_patch.py:104,get_vllm_version]
+[2026-03-06 13:06:39.521645][UC][I] Creating connector with name: UcmNfsStore [556199,556199][factory_v1.py:56,create_connector]
