@@ -1,2 +1,0 @@
-[2026-03-18 14:18:18.685634][UC][I] Logger initialized successfully [1017743,1017743][__init__.py:48,<module>]
-[2026-03-18 14:22:56.802191][UC][I] LLM engine is exiting [1017743,1017743][offline_inference_utils.py:243,build_llm_with_uc]

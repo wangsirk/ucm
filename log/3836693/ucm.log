@@ -1,7 +1,0 @@
-[2026-03-25 17:52:24.439190][UC][I] Logger initialized successfully [3836693,3836693][__init__.py:48,<module>]
-[2026-03-25 17:52:29.333734][UC][I] CPU device is available. [3836693,3836693][ucm_connector.py:114,__init__]
-[2026-03-25 17:52:29.336005][UC][I] Loaded UCM config from /home/w2938/unified-cache-management/test/test_ucm_config.yaml [3836693,3836693][utils.py:54,load_ucm_config_from_yaml]
-[2026-03-25 17:52:29.336061][UC][I] Using UCM with config: {'ucm_connectors': [{'ucm_connector_name': 'UcmNfsStore', 'ucm_connector_config': {'storage_backends': '/home/w2938/model', 'io_direct': False}}]} [3836693,3836693][utils.py:89,get_config]
-[2026-03-25 17:52:29.336086][UC][I] self.launch_config: {'ucm_connectors': [{'ucm_connector_name': 'UcmNfsStore', 'ucm_connector_config': {'storage_backends': '/home/w2938/model', 'io_direct': False}}]} [3836693,3836693][ucm_connector.py:135,__init__]
-[2026-03-25 17:52:29.337495][UC][I] Loaded UCM config from /home/w2938/unified-cache-management/test/test_ucm_config.yaml [3836693,3836693][utils.py:54,load_ucm_config_from_yaml]
-[2026-03-25 17:52:29.337533][UC][I] Using UCM with config: {'ucm_connectors': [{'ucm_connector_name': 'UcmNfsStore', 'ucm_connector_config': {'storage_backends': '/home/w2938/model', 'io_direct': False}}]} [3836693,3836693][utils.py:89,get_config]

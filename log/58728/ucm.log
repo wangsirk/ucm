@@ -1,2 +1,0 @@
-[2026-02-07 20:22:39.786552][UC][I] Logger initialized successfully [58728,58728][__init__.py:48,<module>]
-[2026-02-07 20:22:39.793216][UC][W] vLLM is not installed [58728,58728][apply_patch.py:104,get_vllm_version]
