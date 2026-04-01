@@ -27,6 +27,7 @@
 #include "space_manager.h"
 #include "trans_manager.h"
 #include "global_config.h"
+#include "param_validator.h"
 
 /*
  * LustreStore - Lustre并行文件系统的KV Cache存储实现
@@ -164,11 +165,17 @@ std::string LustreStore::Readme() const
 
 Expected<std::vector<uint8_t>> LustreStore::Lookup(const Detail::BlockId* blocks, size_t num)
 {
+    // 参数校验 (v1.1)
+    if (num > 0) {
+        CHECK_NOT_NULL(blocks, "blocks");
+    }
+    CHECK_RANGE(num, 0, 1000000, "num");  // 防止过大数组
+
     // TODO: 实现块查找逻辑
     // auto res = impl_->spaceMgr.Lookup(blocks, num);
     // if (!res) [[unlikely]] { UC_ERROR("Failed({}) to lookup blocks({}).", res.Error(), num); }
     // return res;
-    
+
     (void)blocks;  // Mark as intentionally unused
     UC_WARN("LustreStore::Lookup not implemented yet, returning empty result for {} blocks.", num);
     return std::vector<uint8_t>(num, 0);
@@ -176,11 +183,19 @@ Expected<std::vector<uint8_t>> LustreStore::Lookup(const Detail::BlockId* blocks
 
 Expected<ssize_t> LustreStore::LookupOnPrefix(const Detail::BlockId* blocks, size_t num)
 {
+    // 参数校验 (v1.1)
+    if (num > 0) {
+        CHECK_NOT_NULL(blocks, "blocks");
+    }
+    CHECK_RANGE(num, 0, 1000000, "num");
+
+    // 注意: blocks 必须按前缀排序，调用者负责确保
+
     // TODO: 实现前缀查找逻辑
     // auto res = impl_->spaceMgr.LookupOnPrefix(blocks, num);
     // if (!res) [[unlikely]] { UC_ERROR("Failed({}) to lookup blocks({}).", res.Error(), num); }
     // return res;
-    
+
     (void)blocks; (void)num;  // Mark as intentionally unused
     UC_WARN("LustreStore::LookupOnPrefix not implemented yet.");
     return static_cast<ssize_t>(-1);
@@ -188,6 +203,16 @@ Expected<ssize_t> LustreStore::LookupOnPrefix(const Detail::BlockId* blocks, siz
 
 void LustreStore::Prefetch(const Detail::BlockId* blocks, size_t num)
 {
+    // 参数校验 (v1.1)
+    if (num == 0) {
+        return;  // 空操作，允许
+    }
+    // 注意: void 函数不能返回错误，仅做基本校验
+    if (blocks == nullptr) {
+        UC_ERROR("Parameter 'blocks' cannot be null");
+        return;
+    }
+
     // TODO: 实现预取逻辑
     (void)blocks; (void)num;  // Mark as intentionally unused
     UC_WARN("LustreStore::Prefetch not implemented yet.");
@@ -195,11 +220,22 @@ void LustreStore::Prefetch(const Detail::BlockId* blocks, size_t num)
 
 Expected<Detail::TaskHandle> LustreStore::Load(Detail::TaskDesc task)
 {
+    // 参数校验 (v1.1)
+    // TaskDesc 是 vector<Shard>，检查是否为空
+    CHECK_RANGE(task.size(), 0, 10000, "task.size");
+
+    // 校验每个 Shard 的地址数组非空
+    for (size_t i = 0; i < task.size(); ++i) {
+        if (task[i].addrs.empty()) {
+            return Status::InvalidParam("task[" + std::to_string(i) + "].addrs cannot be empty");
+        }
+    }
+
     // TODO: 实现加载任务提交
     // auto res = impl_->transMgr.SubmitLoadTask(task);
     // if (!res) [[unlikely]] { UC_ERROR("Failed({}) to submit load task.", res.Error()); }
     // return res;
-    
+
     (void)task;  // Mark as intentionally unused
     UC_WARN("LustreStore::Load not implemented yet.");
     return Detail::TaskHandle{0};
@@ -207,11 +243,21 @@ Expected<Detail::TaskHandle> LustreStore::Load(Detail::TaskDesc task)
 
 Expected<Detail::TaskHandle> LustreStore::Dump(Detail::TaskDesc task)
 {
+    // 参数校验 (v1.1) - 与 Load 相同
+    CHECK_RANGE(task.size(), 0, 10000, "task.size");
+
+    // 校验每个 Shard 的地址数组非空
+    for (size_t i = 0; i < task.size(); ++i) {
+        if (task[i].addrs.empty()) {
+            return Status::InvalidParam("task[" + std::to_string(i) + "].addrs cannot be empty");
+        }
+    }
+
     // TODO: 实现转储任务提交
     // auto res = impl_->transMgr.SubmitDumpTask(task);
     // if (!res) [[unlikely]] { UC_ERROR("Failed({}) to submit dump task.", res.Error()); }
     // return res;
-    
+
     (void)task;  // Mark as intentionally unused
     UC_WARN("LustreStore::Dump not implemented yet.");
     return Detail::TaskHandle{0};
@@ -219,18 +265,26 @@ Expected<Detail::TaskHandle> LustreStore::Dump(Detail::TaskDesc task)
 
 Expected<bool> LustreStore::Check(Detail::TaskHandle taskId)
 {
+    // 参数校验 (v1.1)
+    // TaskHandle 是 size_t，0 表示无效
+    CHECK_PARAM(taskId != 0, "Invalid task handle");
+
     // TODO: 实现任务状态检查
     // return impl_->transMgr.Check(taskId);
-    
+
     UC_WARN("LustreStore::Check not implemented yet for task {}.", taskId);
     return true;
 }
 
 Status LustreStore::Wait(Detail::TaskHandle taskId)
 {
+    // 参数校验 (v1.1)
+    // TaskHandle 是 size_t，0 表示无效
+    CHECK_PARAM(taskId != 0, "Invalid task handle");
+
     // TODO: 实现任务等待逻辑
     // return impl_->transMgr.Wait(taskId);
-    
+
     (void)taskId;  // Mark as intentionally unused
     UC_WARN("LustreStore::Wait not implemented yet for task {}.", taskId);
     return Status::OK();

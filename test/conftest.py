@@ -6,9 +6,13 @@ import os
 import platform as pf
 import random
 import sys
+import warnings
 from pathlib import Path
 
-import pynvml
+# 抑制 pynvml 的弃用警告
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=FutureWarning, message=".*pynvml.*")
+    import pynvml
 import pytest
 from common.config_utils import config_utils as config_instance
 from common.db_utils import database_connection, write_to_db
