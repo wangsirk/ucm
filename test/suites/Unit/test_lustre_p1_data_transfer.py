@@ -75,7 +75,7 @@ def assert_tensors_equal(actual: torch.Tensor, expected: torch.Tensor, msg: str 
 def lustre_config():
     """Lustre Store 配置"""
     return {
-        "storage_backends": ["/home/w2938/tmp/lustre"],
+        "storage_backends": ["/mnt/lustre47/test1"],
         "device_id": -1,
         "block_size": 1024,
         "shard_size": 1024,

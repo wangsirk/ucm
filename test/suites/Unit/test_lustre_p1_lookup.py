@@ -91,7 +91,7 @@ def assert_tensors_equal(actual: torch.Tensor, expected: torch.Tensor, msg: str 
 def lustre_config():
     """Lustre Store 配置"""
     return {
-        "storage_backends": ["/home/w2938/tmp/lustre"],
+        "storage_backends": ["/mnt/lustre47/test1"],
         "device_id": -1,  # CPU only
         "block_size": 1024,
         "shard_size": 1024,
@@ -106,11 +106,11 @@ def lustre_store(lustre_config):
     """Lustre Store 实例"""
     store = UcmPipelineStore(lustre_config)
     yield store
-    # 清理：删除测试数据
-    import shutil
-    data_dir = lustre_config["storage_backends"][0] + "/data"
-    if os.path.exists(data_dir):
-        shutil.rmtree(data_dir, ignore_errors=True)
+    # 🔧 保留测试数据用于调试 - 禁用清理
+    # import shutil
+    # data_dir = lustre_config["storage_backends"][0] + "/data"
+    # if os.path.exists(data_dir):
+    #     shutil.rmtree(data_dir, ignore_errors=True)
 
 
 # ===== P1-L7: Lookup 功能测试 =====

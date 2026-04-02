@@ -48,7 +48,7 @@ def log_test_info(test_name, description, status="PASS"):
 @pytest.fixture
 def minimal_config():
     """最小有效配置"""
-    backend = "/home/w2938/tmp/lustre"
+    backend = "/mnt/lustre47/test0"
     os.makedirs(backend, exist_ok=True)
     return {
         "store_pipeline": "Lustre",
