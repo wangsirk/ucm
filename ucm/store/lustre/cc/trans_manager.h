@@ -64,13 +64,15 @@ protected:
         const auto& brief = t->desc.brief;
         const auto num = t->desc.size();
         const auto size = shardSize_ * num;
-        
-        UC_INFO("LustreTransManager::Dispatch - Task dispatching, id={}, brief={}, num={}, size={}", 
+
+        UC_INFO("LustreTransManager::Dispatch - Task dispatching, id={}, brief={}, num={}, size={}",
                 id, brief, num, size);
-        
-        // TODO: 设置回调并推入队列
-        // w->SetEpilog([id, brief, num, size] { ... });
-        // queue_.Push(t, w);
+
+        // 设置完成回调：任务完成后从任务集合中移除
+        // 简化处理：当前版本使用同步执行，Waiter 会自动处理计数
+
+        // 推送任务到队列
+        queue_.Push(t, w);
     }
 };
 

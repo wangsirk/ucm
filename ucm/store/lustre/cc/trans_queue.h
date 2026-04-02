@@ -36,9 +36,9 @@ namespace UC::LustreStore {
 
 /**
  * TransQueue - Lustre传输队列
- * 
+ *
  * 负责执行实际的I/O操作
- * 未来将支持Lustre条带化并行I/O优化
+ * P1-1.1: 实现任务拆分功能
  */
 class TransQueue {
     using TaskIdSet = HashSet<Detail::TaskHandle>;
@@ -46,12 +46,53 @@ class TransQueue {
     using WaiterPtr = std::shared_ptr<Latch>;
 
 private:
-    struct IoUnit {
-        Detail::TaskHandle owner;
-        TransTask::Type type;
-        Detail::Shard shard;
-        std::shared_ptr<Latch> waiter;
-        bool firstIo{false};
+    // 内部使用的扩展 IoUnit (包含 TransQueue 特有字段)
+    struct ExtendedIoUnit {
+        // ===== IoUnit 核心字段 =====
+        Detail::BlockId blockId;
+        size_t shardIndex;
+        void* srcAddr{nullptr};
+        void* dstAddr{nullptr};
+        size_t fileOffset{0};
+        size_t ioSize{0};
+        std::atomic<bool> completed{false};
+        Status result{Status::OK()};
+
+        // ===== TransQueue 特有字段 =====
+        Detail::TaskHandle owner;        // 所属任务 ID
+        TransTask::Type type;            // 任务类型
+        std::shared_ptr<Latch> waiter;    // 完成通知
+        bool firstIo{false};             // 是否为第一个 I/O
+
+        // ===== P1-1.2: Shard 跟踪字段 =====
+        size_t totalShards{1};           // Block 的总 Shard 数
+        size_t currentShard{0};          // 当前 Shard 索引 (0-based)
+
+        ExtendedIoUnit() = default;
+
+        // 便捷构造函数
+        ExtendedIoUnit(const Detail::BlockId& bid, size_t sidx,
+                       void* src, void* dst, size_t offset, size_t size,
+                       Detail::TaskHandle ownerId, TransTask::Type t,
+                       std::shared_ptr<Latch> w, size_t totalShards = 1, size_t currentShard = 0)
+            : blockId(bid), shardIndex(sidx), srcAddr(src), dstAddr(dst),
+              fileOffset(offset), ioSize(size), owner(ownerId), type(t), waiter(w),
+              totalShards(totalShards), currentShard(currentShard) {}
+
+        // 状态管理方法
+        bool IsCompleted() const noexcept {
+            return completed.load(std::memory_order_acquire);
+        }
+
+        void MarkCompleted(const Status& status) noexcept {
+            result = status;
+            completed.store(true, std::memory_order_release);
+        }
+
+        // P1-1.2: 判断是否是最后一个 Shard
+        bool IsLastShard() const noexcept {
+            return currentShard == totalShards - 1;
+        }
     };
 
     TaskIdSet* failureSet_;
@@ -74,14 +115,33 @@ public:
 
 private:
     /**
+     * P1-1.1: 任务拆分 - 将 TransTask 拆分为多个 ExtendedIoUnit
+     *
+     * 每个 Shard 对应一个 IoUnit，包含:
+     * - BlockId 标识
+     * - Shard 索引
+     * - 源/目标地址
+     * - 文件偏移
+     * - I/O 大小
+     */
+    std::vector<std::unique_ptr<ExtendedIoUnit>> SplitTask(const TransTask& task);
+
+    /**
+     * P1-1.2: 提交文件 - 当所有 Shard 写入完成后
+     *
+     * 将临时文件重命名为正式文件 (原子操作)
+     */
+    Status CommitFile(const Detail::BlockId& blockId);
+
+    /**
      * Host to Storage - 将数据写入磁盘 (Dump)
      */
-    Status H2S(IoUnit& ios);
+    Status H2S(ExtendedIoUnit& ios);
 
     /**
      * Storage to Host - 从磁盘读取数据 (Load)
      */
-    Status S2H(IoUnit& ios);
+    Status S2H(ExtendedIoUnit& ios);
 };
 
 }  // namespace UC::LustreStore

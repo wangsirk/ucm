@@ -68,7 +68,7 @@ struct Config {
     size_t dataTransConcurrency{LUSTRE_DEFAULT_TRANS_CONCURRENCY};   // 数据传输并发度
     size_t lookupConcurrency{LUSTRE_DEFAULT_LOOKUP_CONCURRENCY};     // 查找并发度
     size_t timeoutMs{30000};                            // 操作超时时间，单位毫秒
-    size_t dataDirShardBytes{3};                        // 数据目录分片字节数
+    size_t dataDirShardBytes{0};                        // 数据目录分片字节数 (0=不分片，直接存data目录)
     // Lustre特有配置
     int stripeCount{LUSTRE_DEFAULT_STRIPE_COUNT};       // 条带数量
     size_t stripeSize{LUSTRE_DEFAULT_STRIPE_SIZE};      // 条带大小

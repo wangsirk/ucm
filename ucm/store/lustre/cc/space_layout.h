@@ -65,6 +65,13 @@ public:
      */
     Status CommitFile(const Detail::BlockId& blockId, bool success) const;
 
+    /**
+     * 检查 Block 文件是否存在
+     * @param blockId 块ID
+     * @return true 文件存在，false 文件不存在
+     */
+    bool Exists(const Detail::BlockId& blockId) const;
+
 private:
     std::vector<std::string> RelativeRoots() const;
     Status AddStorageBackend(const std::string& path);

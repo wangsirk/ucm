@@ -42,20 +42,46 @@ Status SpaceManager::Setup(const Config& config)
 std::vector<uint8_t> SpaceManager::Lookup(const Detail::BlockId* blocks, size_t num)
 {
     UC_INFO("LustreSpaceManager::Lookup - Looking up {} blocks", num);
-    // TODO: 实现并发查找逻辑
     std::vector<uint8_t> result(num, 0);
     for (size_t i = 0; i < num; i++) {
-        result[i] = Lookup(&blocks[i]);
+        result[i] = LookupSingle(&blocks[i]);
     }
+    size_t foundCount = std::count(result.begin(), result.end(), 1);
+    UC_INFO("LustreSpaceManager::Lookup - {} blocks, {} found", num, foundCount);
     return result;
 }
 
-uint8_t SpaceManager::Lookup(const Detail::BlockId* block)
+uint8_t SpaceManager::LookupSingle(const Detail::BlockId* block)
 {
-    UC_DEBUG("LustreSpaceManager::Lookup - Looking up single block");
-    // TODO: 实现单个Block查找逻辑
-    // 未来将支持OST感知的查找优化
-    return 0;
+    if (!block) {
+        return 0;
+    }
+
+    // 使用 SpaceLayout 检查文件存在
+    bool exists = layout_.Exists(*block);
+
+    UC_DEBUG("LustreSpaceManager::LookupSingle - block={}, exists={}",
+             (*block)[0], exists);
+
+    return exists ? 1 : 0;
+}
+
+ssize_t SpaceManager::LookupOnPrefix(const Detail::BlockId* blocks, size_t num)
+{
+    if (!blocks || num == 0) {
+        return -1;
+    }
+
+    // 遍历 blocks，找到第一个不存在的
+    for (size_t i = 0; i < num; i++) {
+        if (LookupSingle(&blocks[i]) == 0) {
+            UC_DEBUG("LustreSpaceManager::LookupOnPrefix - first missing at index={}", i);
+            return static_cast<ssize_t>(i);
+        }
+    }
+
+    UC_DEBUG("LustreSpaceManager::LookupOnPrefix - all {} blocks exist", num);
+    return -1;  // 全部存在
 }
 
 }  // namespace UC::LustreStore

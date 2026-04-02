@@ -55,12 +55,26 @@ public:
     std::vector<uint8_t> Lookup(const Detail::BlockId* blocks, size_t num);
 
     /**
+     * 前缀查找，返回第一个缺失的Block索引
+     * @param blocks Block ID数组（按前缀顺序）
+     * @param num Block数量
+     * @return 第一个缺失Block的索引，-1表示全部存在
+     */
+    ssize_t LookupOnPrefix(const Detail::BlockId* blocks, size_t num);
+
+    /**
      * 获取空间布局
      * @return 空间布局指针
      */
     const SpaceLayout* GetLayout() const { return &layout_; }
 
 private:
+    /**
+     * 单个Block查找
+     * @param block Block ID
+     * @return 1=存在, 0=不存在
+     */
+    uint8_t LookupSingle(const Detail::BlockId* block);
     /**
      * 单个Block查找
      * @param block Block ID

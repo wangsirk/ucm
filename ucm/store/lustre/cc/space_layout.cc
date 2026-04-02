@@ -28,6 +28,8 @@
 #include "param_validator.h"
 
 #include <sstream>
+#include <unistd.h>
+#include <sys/syscall.h>
 #include <iomanip>
 #include <unistd.h>
 #include <errno.h>
@@ -109,7 +111,8 @@ Status SpaceLayout::Setup(const Config& config)
         return Status::InvalidParam("storageBackends cannot be empty");
     }
 
-    // 创建基础目录结构
+    // 创建基础目录结构（仅创建 data 目录，不预先创建分片目录）
+    // 分片目录将按需创建（lazy creation）
     for (const auto& backend : storageBackends_) {
         std::string dataDir = backend + "/data";
 
@@ -118,21 +121,6 @@ Status SpaceLayout::Setup(const Config& config)
             UC_ERROR("LustreSpaceLayout::Setup - Failed to create data directory {}: {}",
                      dataDir, s.ToString());
             return s;
-        }
-
-        // 创建分片目录（如果启用）
-        if (dataDirShard_) {
-            // 创建 2 级分片目录 (00/00/ ~ ff/ff/)
-            for (int i = 0; i < 256; ++i) {
-                for (int j = 0; j < 256; ++j) {
-                    std::string shardDir = dataDir + "/" +
-                                         std::string(fmt::format("{:02x}", i)) + "/" +
-                                         std::string(fmt::format("{:02x}", j)) + "/";
-
-                    // 尝试创建，忽略已存在错误
-                    LustreFile::MkDir(shardDir, 0755);
-                }
-            }
         }
     }
 
@@ -255,6 +243,12 @@ std::string SpaceLayout::StorageBackend(const Detail::BlockId& blockId) const
     size_t index = data[0] % storageBackends_.size();
 
     return storageBackends_[index];
+}
+
+bool SpaceLayout::Exists(const Detail::BlockId& blockId) const
+{
+    std::string path = DataFilePath(blockId, false);
+    return LustreFile::Exists(path);
 }
 
 }  // namespace UC::LustreStore

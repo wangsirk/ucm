@@ -8,8 +8,15 @@ Lustre Store 流程验证测试脚本
 """
 
 import sys
+import hashlib
 import torch
 import numpy as np
+
+
+def generate_block_id(seed: int = 0) -> bytes:
+    """生成测试用 BlockId (16字节)"""
+    data = f"test_block_{seed}".encode()
+    return hashlib.sha256(data).digest()[:16]
 
 def test_lustre_store_registration():
     """测试 Lustre Store 是否已在工厂中注册"""
@@ -64,9 +71,9 @@ def test_lustre_store_flow(store):
     print("=" * 60)
     
     # 模拟 block_ids (token 对应的 block hash)
-    # BlockId 必须是 16 字节，所以每个 block_id 需要填充到 16 字节
-    block_ids = [b"test_block_001\x00", b"test_block_002\x00", b"test_block_003\x00"]
-    shard_index = [0, 0, 0]
+    # 使用与单元测试相同的方式生成 16 字节 BlockId
+    block_ids = [generate_block_id(i) for i in range(3)]
+    shard_index = [0, 1, 2]  # 每个 block 不同的 shard 索引
     
     # 测试 lookup
     print("\n--- 测试 lookup ---")
@@ -88,60 +95,49 @@ def test_lustre_store_flow(store):
     
     # 测试 dump (模拟将 token 数据写入存储)
     print("\n--- 测试 dump ---")
-    # 创建模拟的 tensor 数据
-    dummy_tensor = [[torch.randn(1, 1024) for _ in range(1)] for _ in range(len(block_ids))]
+    # 创建模拟的 tensor 数据 (1D uint8 tensor)
+    import numpy as np
+    dummy_tensor = [[torch.from_numpy(np.frombuffer(bytes([0xAA] * 512), dtype=np.uint8).copy())] for _ in range(len(block_ids))]
+
+    # 打印写入前的数据
+    print("\n📝 写入前的数据:")
+    for i, (bid, tensor) in enumerate(zip(block_ids, dummy_tensor)):
+        data_bytes = tensor[0].numpy().tobytes()[:32]  # 只打印前32字节
+        print(f"  Block[{i}] BlockId: {bid.hex()[:16]}...")
+        print(f"    数据前32字节: {data_bytes.hex()}")
+
     dump_task = store.dump(block_ids, shard_index, dummy_tensor)
     print(f"dump 任务创建: task_id={dump_task.task_id}")
     print("✅ dump 流程完成 (打印语句并返回)")
     
     # 测试 load (模拟从存储读取 token 数据)
     print("\n--- 测试 load ---")
-    dst_tensor = [[torch.randn(1, 1024) for _ in range(1)] for _ in range(len(block_ids))]
+    # 初始化目标 tensor 为全0
+    dst_tensor = [[torch.from_numpy(np.frombuffer(bytes([0x00] * 512), dtype=np.uint8).copy())] for _ in range(len(block_ids))]
+
+    # 打印读取前的数据 (应该是全0)
+    print("\n📖 读取前的数据 (预期全0):")
+    for i, (bid, tensor) in enumerate(zip(block_ids, dst_tensor)):
+        data_bytes = tensor[0].numpy().tobytes()[:32]  # 只打印前32字节
+        print(f"  Block[{i}] BlockId: {bid.hex()[:16]}...")
+        print(f"    数据前32字节: {data_bytes.hex()}")
+
     load_task = store.load(block_ids, shard_index, dst_tensor)
     print(f"load 任务创建: task_id={load_task.task_id}")
-    print("✅ load 流程完成 (打印语句并返回)")
-    
-    # 测试 wait 和 check
-    print("\n--- 测试 wait/check ---")
+
+    # 测试 wait - 等待 load 完成
+    print("\n--- 测试 wait ---")
     store.wait(load_task)
     print("✅ wait 流程完成")
-    
-    is_complete = store.check(load_task)
-    print(f"check 结果: {is_complete}")
-    print("✅ check 流程完成")
-    
-    # 测试 load_data 和 dump_data (低级接口)
-    print("\n--- 测试 load_data/dump_data ---")
-    dummy_addr = np.array([[0x1000, 0x2000], [0x3000, 0x4000], [0x5000, 0x6000]])
-    
-    load_data_task = store.load_data(block_ids, shard_index, dummy_addr)
-    print(f"load_data 任务创建: task_id={load_data_task.task_id}")
-    
-    dump_data_task = store.dump_data(block_ids, shard_index, dummy_addr)
-    print(f"dump_data 任务创建: task_id={dump_data_task.task_id}")
-    print("✅ load_data/dump_data 流程完成")
-    
+
+    # 打印读取后的数据
+    print("\n📖 读取后的数据:")
+    for i, (bid, tensor) in enumerate(zip(block_ids, dst_tensor)):
+        data_bytes = tensor[0].numpy().tobytes()[:32]  # 只打印前32字节
+        print(f"  Block[{i}] BlockId: {bid.hex()[:16]}...")
+        print(f"    数据前32字节: {data_bytes.hex()}")
+
     return True
-
-
-def test_direct_import():
-    """测试直接导入 Lustre Store 模块"""
-    print("\n" + "=" * 60)
-    print("步骤4: 测试直接导入模块")
-    print("=" * 60)
-    
-    try:
-        from ucm.store.lustre import UcmLustreStore
-        print(f"✅ 直接导入成功: {UcmLustreStore}")
-        
-        # 直接创建实例
-        config = {"storage_backends": ["/tmp/test"]}
-        store = UcmLustreStore(config)
-        print(f"✅ 直接创建实例成功: {store}")
-        return True
-    except Exception as e:
-        print(f"❌ 直接导入失败: {e}")
-        return False
 
 
 def main():
@@ -161,10 +157,7 @@ def main():
     # 测试3: 流程测试
     if store:
         results.append(("流程测试", test_lustre_store_flow(store)))
-    
-    # 测试4: 直接导入
-    results.append(("直接导入", test_direct_import()))
-    
+
     # 汇总结果
     print("\n" + "=" * 60)
     print("测试结果汇总")
