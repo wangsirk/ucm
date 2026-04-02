@@ -27,6 +27,7 @@
 #include "fcntl.h"
 #include <unistd.h>
 #include <unordered_map>
+#include <cstring>
 
 namespace UC::LustreStore {
 
@@ -35,19 +36,30 @@ Status TransQueue::Setup(const Config& config, TaskIdSet* failureSet, const Spac
     UC_INFO("LustreTransQueue::Setup - Initializing trans queue");
     UC_INFO("LustreTransQueue::Setup - IO size: {}, shard size: {}", config.tensorSize, config.shardSize);
     UC_INFO("LustreTransQueue::Setup - IO direct: {}, concurrency: {}", config.ioDirect, config.dataTransConcurrency);
-    
+    UC_INFO("LustreTransQueue::Setup - Async I/O: {}, backend: {}", config.enableAsyncIo, config.asyncIoBackend);
+
     failureSet_ = failureSet;
     layout_ = layout;
     ioSize_ = config.tensorSize;
     shardSize_ = config.shardSize;
     nShardPerBlock_ = config.blockSize / config.shardSize;
     ioDirect_ = config.ioDirect;
-    
-    // TODO: 启动线程池
-    // auto success = pool_.SetNWorker(config.dataTransConcurrency)
-    //                    .SetWorkerFn([this](auto& ios, auto&) { Worker(ios); })
-    //                    .Run();
-    
+
+    // P2: 初始化异步 I/O 后端
+    enableAsyncIo_ = config.enableAsyncIo;
+    if (enableAsyncIo_) {
+        asyncIo_ = AsyncIOAdapter::Create(config.asyncIoBackend);
+        Status s = asyncIo_->Setup(config.asyncIoQueueDepth, config.dataTransCpuCores);
+        if (s.Failure()) {
+            UC_WARN("Failed to initialize async I/O ({}), falling back to sync I/O", s.ToString());
+            enableAsyncIo_ = false;
+            asyncIo_.reset();
+        } else {
+            UC_INFO("LustreTransQueue::Setup - Async I/O initialized (queue depth: {})",
+                    config.asyncIoQueueDepth);
+        }
+    }
+
     UC_INFO("LustreTransQueue::Setup - Trans queue initialized successfully");
     return Status::OK();
 }
@@ -56,13 +68,13 @@ Status TransQueue::Setup(const Config& config, TaskIdSet* failureSet, const Spac
 // P1-1.1: 任务拆分实现
 // ============================================================================
 
-std::vector<std::unique_ptr<TransQueue::ExtendedIoUnit>>
+std::vector<std::shared_ptr<TransQueue::ExtendedIoUnit>>
 TransQueue::SplitTask(const TransTask& task)
 {
     UC_INFO("LustreTransQueue::SplitTask - Splitting task, id={}, type={}, shards={}",
             task.id, static_cast<int>(task.type), task.desc.size());
 
-    std::vector<std::unique_ptr<ExtendedIoUnit>> units;
+    std::vector<std::shared_ptr<ExtendedIoUnit>> units;
     units.reserve(task.desc.size());
 
     // P1-1.2: 首先按 BlockId 分组，计算每个 Block 的 Shard 数量
@@ -108,8 +120,8 @@ TransQueue::SplitTask(const TransTask& task)
             }
         }
 
-        // 创建 IoUnit
-        auto ioUnit = std::make_unique<ExtendedIoUnit>(
+        // 创建 IoUnit (使用 shared_ptr 以支持异步回调的生命周期管理)
+        auto ioUnit = std::make_shared<ExtendedIoUnit>(
             shard.owner,           // BlockId
             shard.index,          // ShardIndex
             srcAddr,              // 源地址
@@ -123,12 +135,7 @@ TransQueue::SplitTask(const TransTask& task)
             currentShard          // P1-1.2: 当前 Shard 序号
         );
 
-        units.push_back(std::move(ioUnit));
-    }
-
-    // 标记第一个 I/O
-    if (!units.empty()) {
-        units[0]->firstIo = true;
+        units.push_back(ioUnit);
     }
 
     UC_INFO("LustreTransQueue::SplitTask - Split into {} units", units.size());
@@ -157,9 +164,9 @@ void TransQueue::Push(TaskPtr task, WaiterPtr waiter)
         // pool_.Push(std::move(unit));
         // 暂时直接执行 (P1-1 阶段)
         if (task->type == TransTask::Type::DUMP) {
-            H2S(*unit);
+            H2S(unit);
         } else {
-            S2H(*unit);
+            S2H(unit);
         }
     }
 }
@@ -177,24 +184,24 @@ Status TransQueue::CommitFile(const Detail::BlockId& blockId)
 }
 
 // ============================================================================
-// H2S (Dump) 实现
+// H2S (Dump) 实现 - P2 支持异步 I/O
 // ============================================================================
 
-Status TransQueue::H2S(TransQueue::ExtendedIoUnit& ios)
+Status TransQueue::H2S(const std::shared_ptr<ExtendedIoUnit>& ios)
 {
     // 1. 生成临时文件路径
-    std::string tmpPath = layout_->DataFilePath(ios.blockId, true);
+    std::string tmpPath = layout_->DataFilePath(ios->blockId, true);
 
-    // 2. 打开或创建临时文件
-    LustreFile file(tmpPath);
+    // 2. 打开或创建临时文件 - 使用 shared_ptr 管理生命周期
+    auto file = std::make_shared<LustreFile>(tmpPath);
 
     // 检查文件是否已存在 (追加模式)
     if (LustreFile::Exists(tmpPath)) {
         UC_DEBUG("LustreTransQueue::H2S - Temp file exists, opening for append");
-        Status status = file.Open(O_WRONLY | O_APPEND);
+        Status status = file->Open(O_WRONLY | O_APPEND);
         if (status.Failure()) {
             UC_ERROR("LustreTransQueue::H2S - Failed to open temp file: {}", status.ToString());
-            if (ios.waiter) { ios.waiter->Done(); }
+            if (ios->waiter) { ios->waiter->Done(); }
             return status;
         }
     } else {
@@ -203,120 +210,277 @@ Status TransQueue::H2S(TransQueue::ExtendedIoUnit& ios)
         if (lastSlash != std::string::npos) {
             std::string dir = tmpPath.substr(0, lastSlash);
             Status dirStatus = LustreFile::MkDir(dir, 0755);
-            // 目录已存在不算错误，继续执行
             if (dirStatus.Failure()) {
                 UC_WARN("LustreTransQueue::H2S - Failed to create directory: {}", dirStatus.ToString());
             }
         }
 
         // 创建新文件
-        Status status = file.CreateNormal(O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        Status status = file->CreateNormal(O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (status.Failure()) {
             UC_ERROR("LustreTransQueue::H2S - Failed to create temp file: {}", status.ToString());
-            if (ios.waiter) { ios.waiter->Done(); }
+            if (ios->waiter) { ios->waiter->Done(); }
             return status;
         }
     }
 
-    // 3. 写入数据 (使用 pwrite 支持并发写入不同偏移)
-    if (ios.srcAddr != nullptr && ios.ioSize > 0) {
-        Status status = file.Write(ios.srcAddr, ios.ioSize, ios.fileOffset);
-        if (status.Failure()) {
-            UC_ERROR("LustreTransQueue::H2S - Write failed: {}", status.ToString());
-            file.Close();
-            LustreFile::Remove(tmpPath);  // 清理失败的临时文件
-            // 通知 waiter 任务失败
-            if (ios.waiter) { ios.waiter->Done(); }
-            return status;
+    // 3. 写入数据 (同步或异步)
+    if (ios->srcAddr != nullptr && ios->ioSize > 0) {
+        if (enableAsyncIo_ && asyncIo_) {
+            // P2: 异步 I/O 路径 - 传递 shared_ptr 保持文件打开状态
+            return H2SAsync(ios, tmpPath, file);
+        } else {
+            // 同步 I/O 路径
+            return H2SSync(ios, tmpPath, *file);
         }
     } else {
         UC_WARN("LustreTransQueue::H2S - Skipping write: srcAddr={}, ioSize={}",
-                fmt::ptr(ios.srcAddr), ios.ioSize);
+                fmt::ptr(ios->srcAddr), ios->ioSize);
+        // 标记完成并通知 waiter
+        ios->MarkCompleted(Status::OK());
+        if (ios->waiter) { ios->waiter->Done(); }
+        return Status::OK();
+    }
+}
+
+// P2: 同步 H2S 实现 (保持原有逻辑)
+Status TransQueue::H2SSync(const std::shared_ptr<ExtendedIoUnit>& ios, const std::string& tmpPath, LustreFile& file)
+{
+    // 写入数据 (使用 pwrite 支持并发写入不同偏移)
+    Status status = file.Write(ios->srcAddr, ios->ioSize, ios->fileOffset);
+    if (status.Failure()) {
+        UC_ERROR("LustreTransQueue::H2SSync - Write failed: {}", status.ToString());
+        file.Close();
+        LustreFile::Remove(tmpPath);
+        if (ios->waiter) { ios->waiter->Done(); }
+        return status;
     }
 
-    // 4. P1-1.2: 如果是最后一个 Shard，提交文件
-    if (ios.IsLastShard()) {
-        Status commitStatus = CommitFile(ios.blockId);
+    // 如果是最后一个 Shard，提交文件
+    if (ios->IsLastShard()) {
+        // 确保数据写入磁盘后再提交
+        Status syncStatus = file.Sync();
+        if (syncStatus.Failure()) {
+            UC_ERROR("LustreTransQueue::H2SSync - Sync failed: {}", syncStatus.ToString());
+            if (ios->waiter) { ios->waiter->Done(); }
+            return syncStatus;
+        }
+
+        Status commitStatus = CommitFile(ios->blockId);
         if (commitStatus.Failure()) {
-            UC_ERROR("LustreTransQueue::H2S - Commit failed: {}", commitStatus.ToString());
-            if (ios.waiter) { ios.waiter->Done(); }
+            UC_ERROR("LustreTransQueue::H2SSync - Commit failed: {}", commitStatus.ToString());
+            if (ios->waiter) { ios->waiter->Done(); }
             return commitStatus;
         }
     }
 
-    UC_DEBUG("LustreTransQueue::H2S - Shard {}/{} write completed",
-             ios.currentShard, ios.totalShards);
+    UC_DEBUG("LustreTransQueue::H2SSync - Shard {}/{} write completed",
+             ios->currentShard, ios->totalShards);
 
-    // 标记完成
-    ios.MarkCompleted(Status::OK());
+    ios->MarkCompleted(Status::OK());
+    if (ios->waiter) { ios->waiter->Done(); }
 
-    // 通知 waiter 完成
-    if (ios.waiter) {
-        UC_INFO("LustreTransQueue::H2S - Calling waiter->Done()");
-        ios.waiter->Done();
-        UC_INFO("LustreTransQueue::H2S - waiter->Done() returned");
-    } else {
-        UC_INFO("LustreTransQueue::H2S - waiter is null, skipping Done()");
-    }
-
-    UC_INFO("LustreTransQueue::H2S - EXIT, returning OK");
     return Status::OK();
 }
 
-Status TransQueue::S2H(TransQueue::ExtendedIoUnit& ios)
+// P2: 异步 H2S 实现
+Status TransQueue::H2SAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
+                             const std::string& tmpPath,
+                             const std::shared_ptr<LustreFile>& file)
+{
+    // 提交异步写请求
+    // 重要：捕获 shared_ptr (而非 weak_ptr) 确保 ExtendedIoUnit 在回调执行前不会被销毁
+    int fd = file->GetFd();
+    IoRequest req(
+        fd,
+        ios->srcAddr,
+        ios->ioSize,
+        static_cast<off64_t>(ios->fileOffset),
+        true,  // isWrite
+        [this, ios, tmpPath, file](IoRequest::Result result, ssize_t bytesTransferred) {
+            // ios 是 shared_ptr，保证对象在整个回调期间存活
+
+            if (result == IoRequest::Result::FAILURE) {
+                UC_ERROR("LustreTransQueue::H2SAsync - Async write failed");
+                LustreFile::Remove(tmpPath);
+                ios->MarkCompleted(Status::OsApiError("Async write failed"));
+                if (ios->waiter) { ios->waiter->Done(); }
+                return;
+            }
+
+            // 写入成功，如果是最后一个 Shard，提交文件
+            if (ios->IsLastShard()) {
+                Status commitStatus = CommitFile(ios->blockId);
+                // 幂等操作：DuplicateKey 表示其他 shard 已提交，应视为成功
+                if (!commitStatus.IsSuccessOrDuplicate()) {
+                    UC_ERROR("LustreTransQueue::H2SAsync - Commit failed: {}", commitStatus.ToString());
+                    ios->MarkCompleted(commitStatus);
+                    if (ios->waiter) { ios->waiter->Done(); }
+                    return;
+                }
+                if (commitStatus.IsDuplicate()) {
+                    UC_INFO("LustreTransQueue::H2SAsync - Commit: file already exists (concurrent commit)");
+                }
+            }
+
+            UC_DEBUG("LustreTransQueue::H2SAsync - Shard {}/{} async write completed",
+                     ios->currentShard, ios->totalShards);
+
+            ios->MarkCompleted(Status::OK());
+            if (ios->waiter) { ios->waiter->Done(); }
+        }
+    );
+
+    Status s = asyncIo_->SubmitWrite(req);
+    if (s.Failure()) {
+        // 回退到同步 I/O（确保文件正确关闭）
+        UC_WARN("Async submit failed, falling back to sync I/O: {}", s.ToString());
+        LustreFile file(tmpPath);
+        Status openStatus = file.Open(O_WRONLY | O_APPEND);
+        if (openStatus.Failure()) {
+            UC_ERROR("Failed to open file in fallback mode: {}", openStatus.ToString());
+            if (ios->waiter) { ios->waiter->Done(); }
+            return openStatus;
+        }
+        // H2SSync 内部会关闭文件
+        return H2SSync(ios, tmpPath, file);
+    }
+
+    // 等待异步操作完成，确保回调被处理
+    // 轮询等待 completed 标志，同时处理完成队列
+    const int maxWaitMs = 5000;  // 最大等待 5 秒
+    const int pollIntervalMs = 1; // 每次轮询间隔 1ms
+    int waitedMs = 0;
+
+    while (!ios->IsCompleted() && waitedMs < maxWaitMs) {
+        asyncIo_->ProcessCompletion(pollIntervalMs);
+        waitedMs += pollIntervalMs;
+    }
+
+    if (!ios->IsCompleted()) {
+        UC_ERROR("LustreTransQueue::H2SAsync - Async write timeout after {}ms", waitedMs);
+        if (ios->waiter) { ios->waiter->Done(); }
+        return Status::OsApiError("Async write timeout");
+    }
+
+    // 检查异步操作的结果
+    if (ios->result.Failure()) {
+        UC_ERROR("LustreTransQueue::H2SAsync - Async write failed: {}", ios->result.ToString());
+        return ios->result;
+    }
+
+    UC_DEBUG("LustreTransQueue::H2SAsync - Async write completed and verified");
+    return Status::OK();
+}
+
+Status TransQueue::S2H(const std::shared_ptr<ExtendedIoUnit>& ios)
 {
     UC_INFO("LustreTransQueue::S2H - Storage to Host (Load), owner={}, shard={}",
-            ios.owner, ios.shardIndex);
-
-    // P1-1.3: 实现数据读取逻辑
+            ios->owner, ios->shardIndex);
 
     // 1. 生成正式文件路径 (非临时文件)
-    std::string finalPath = layout_->DataFilePath(ios.blockId, false);
+    std::string finalPath = layout_->DataFilePath(ios->blockId, false);
     UC_DEBUG("LustreTransQueue::S2H - Final file path: {}", finalPath);
 
     // 2. 检查文件是否存在
     if (!LustreFile::Exists(finalPath)) {
         UC_ERROR("LustreTransQueue::S2H - File does not exist: {}", finalPath);
-        if (ios.waiter) { ios.waiter->Done(); }
-        failureSet_->Insert(ios.owner);  // 错误传播: 标记任务失败
+        if (ios->waiter) { ios->waiter->Done(); }
+        failureSet_->Insert(ios->owner);
         return Status::NotFound();
     }
 
-    // 3. 打开文件读取
-    LustreFile file(finalPath);
-    Status status = file.Open(O_RDONLY);
+    // 3. 打开文件读取 - 使用 shared_ptr 管理生命周期
+    auto file = std::make_shared<LustreFile>(finalPath);
+    Status status = file->Open(O_RDONLY);
     if (status.Failure()) {
         UC_ERROR("LustreTransQueue::S2H - Failed to open file: {}", status.ToString());
-        if (ios.waiter) { ios.waiter->Done(); }
-        failureSet_->Insert(ios.owner);  // 错误传播: 标记任务失败
+        if (ios->waiter) { ios->waiter->Done(); }
+        failureSet_->Insert(ios->owner);
         return status;
     }
 
-    // 4. 读取数据 (使用 pread 支持并发读取不同偏移)
-    if (ios.dstAddr != nullptr && ios.ioSize > 0) {
-        status = file.Read(ios.dstAddr, ios.ioSize, ios.fileOffset);
-        if (status.Failure()) {
-            UC_ERROR("LustreTransQueue::S2H - Read failed: {}", status.ToString());
-            file.Close();
-            if (ios.waiter) { ios.waiter->Done(); }
-            failureSet_->Insert(ios.owner);  // 错误传播: 标记任务失败
-            return status;
+    // 4. 读取数据 (同步或异步)
+    if (ios->dstAddr != nullptr && ios->ioSize > 0) {
+        if (enableAsyncIo_ && asyncIo_) {
+            // P2: 异步 I/O 路径 - 传递 shared_ptr 保持文件打开状态
+            return S2HAsync(ios, finalPath, file);
+        } else {
+            // 同步 I/O 路径
+            return S2HSync(ios, finalPath, *file);
         }
-    }
-
-    UC_DEBUG("LustreTransQueue::S2H - Shard {} read completed", ios.shardIndex);
-
-    // 标记完成
-    ios.MarkCompleted(Status::OK());
-
-    // 通知 waiter 完成 (关键: 避免 Wait 永久阻塞)
-    if (ios.waiter) {
-        UC_INFO("LustreTransQueue::S2H - Calling waiter->Done()");
-        ios.waiter->Done();
-        UC_INFO("LustreTransQueue::S2H - waiter->Done() returned");
     } else {
-        UC_INFO("LustreTransQueue::S2H - waiter is null, skipping Done()");
+        UC_WARN("LustreTransQueue::S2H - Skipping read: dstAddr={}, ioSize={}",
+                fmt::ptr(ios->dstAddr), ios->ioSize);
+        ios->MarkCompleted(Status::OK());
+        if (ios->waiter) { ios->waiter->Done(); }
+        return Status::OK();
     }
+}
+
+// P2: 同步 S2H 实现 (保持原有逻辑)
+Status TransQueue::S2HSync(const std::shared_ptr<ExtendedIoUnit>& ios, const std::string& finalPath, LustreFile& file)
+{
+    // 读取数据 (使用 pread 支持并发读取不同偏移)
+    Status status = file.Read(ios->dstAddr, ios->ioSize, ios->fileOffset);
+    if (status.Failure()) {
+        UC_ERROR("LustreTransQueue::S2HSync - Read failed: {}", status.ToString());
+        file.Close();
+        if (ios->waiter) { ios->waiter->Done(); }
+        failureSet_->Insert(ios->owner);
+        return status;
+    }
+
+    UC_DEBUG("LustreTransQueue::S2HSync - Shard {} read completed", ios->shardIndex);
+
+    ios->MarkCompleted(Status::OK());
+    if (ios->waiter) { ios->waiter->Done(); }
+
+    return Status::OK();
+}
+
+// P2: 异步 S2H 实现
+Status TransQueue::S2HAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
+                             const std::string& finalPath,
+                             const std::shared_ptr<LustreFile>& file)
+{
+    // 提交异步读请求
+    // 重要：捕获 shared_ptr (而非 weak_ptr) 确保 ExtendedIoUnit 在回调执行前不会被销毁
+    int fd = file->GetFd();
+    IoRequest req(
+        fd,
+        ios->dstAddr,
+        ios->ioSize,
+        static_cast<off64_t>(ios->fileOffset),
+        false,  // isWrite = false (读)
+        [this, ios, file](IoRequest::Result result, ssize_t bytesTransferred) {
+            // ios 是 shared_ptr，保证对象在整个回调期间存活
+
+            // 回调函数
+            if (result == IoRequest::Result::FAILURE) {
+                UC_ERROR("LustreTransQueue::S2HAsync - Async read failed");
+                ios->MarkCompleted(Status::OsApiError("Async read failed"));
+                failureSet_->Insert(ios->owner);
+                if (ios->waiter) { ios->waiter->Done(); }
+                return;
+            }
+
+            UC_DEBUG("LustreTransQueue::S2HAsync - Shard {} async read completed", ios->shardIndex);
+
+            ios->MarkCompleted(Status::OK());
+            if (ios->waiter) { ios->waiter->Done(); }
+        }
+    );
+
+    Status s = asyncIo_->SubmitRead(req);
+    if (s.Failure()) {
+        // 回退到同步 I/O
+        UC_WARN("Async submit failed, falling back to sync I/O: {}", s.ToString());
+        return S2HSync(ios, finalPath, *file);
+    }
+
+    // 处理完成队列（非阻塞）
+    asyncIo_->ProcessCompletion(0);
 
     return Status::OK();
 }

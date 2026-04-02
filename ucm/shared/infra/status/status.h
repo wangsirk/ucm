@@ -67,6 +67,9 @@ public:
     }
     constexpr bool Success() const noexcept { return code_ == OK_; }
     constexpr bool Failure() const noexcept { return !Success(); }
+    constexpr bool IsDuplicate() const noexcept { return code_ == EDUPLICATE_; }
+    // 幂等操作中 DuplicateKey 视为成功（并发提交场景）
+    constexpr bool IsSuccessOrDuplicate() const noexcept { return Success() || IsDuplicate(); }
 
 public:
     Status(int32_t code, std::string message) : code_{code}, message_{std::move(message)} {}
