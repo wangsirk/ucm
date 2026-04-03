@@ -299,8 +299,8 @@ class TestNonLustreFallback:
 
         # Load
         loaded = [torch.zeros(1024, dtype=torch.uint8)]
-        store.load([block_id], [0], [loaded])
-        store.wait(store.load([block_id], [0], [loaded]))
+        task = store.load([block_id], [0], [loaded])
+        store.wait(task)
 
         # 验证数据
         assert loaded[0].equal(test_data), "❌ Load 数据不匹配"

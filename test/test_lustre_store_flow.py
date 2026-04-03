@@ -46,12 +46,12 @@ def test_lustre_store_creation():
     from ucm.store.factory_v1 import UcmConnectorFactoryV1
     
     config = {
-        "storage_backends": ["/home/w2938/test/lustre_store"],  # 模拟的 Lustre 存储路径
+        "storage_backends": ["/mnt/lustre47/demo"],  # Lustre 客户端存储路径
         "device_id": -1,  # CPU only
         "block_size": 512,
         "tensor_size": 512,
         "shard_size": 512,
-        "stripe_count": 0,
+        "stripe_count": 0,  # 不启用条带化
         "stripe_size": 0,
     }
     

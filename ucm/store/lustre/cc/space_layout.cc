@@ -99,11 +99,15 @@ Status SpaceLayout::Setup(const Config& config)
     UC_INFO("LustreSpaceLayout::Setup - Initializing space layout");
     UC_INFO("LustreSpaceLayout::Setup - Storage backends: {}", config.storageBackends);
     UC_INFO("LustreSpaceLayout::Setup - Data dir shard bytes: {}", config.dataDirShardBytes);
+    UC_INFO("LustreSpaceLayout::Setup - Stripe count: {}, Stripe size: {}",
+            config.stripeCount, config.stripeSize);
 
     // 存储配置
     storageBackends_ = config.storageBackends;
     dataDirShard_ = config.dataDirShardBytes > 0;
     dataDirShardBytes_ = config.dataDirShardBytes;
+    stripeCount_ = config.stripeCount;
+    stripeSize_ = config.stripeSize;
 
     // 验证存储后端
     if (storageBackends_.empty()) {
@@ -116,11 +120,28 @@ Status SpaceLayout::Setup(const Config& config)
     for (const auto& backend : storageBackends_) {
         std::string dataDir = backend + "/data";
 
-        // 创建数据目录
-        if (auto s = LustreFile::MkDir(dataDir, 0755); s.Failure()) {
-            UC_ERROR("LustreSpaceLayout::Setup - Failed to create data directory {}: {}",
-                     dataDir, s.ToString());
-            return s;
+        // 根据条带配置选择目录创建方式
+        if (stripeCount_ > 0) {
+            // 使用条带化目录创建
+            // SetStripedDirectory 内部使用 llapi_layout_file_create() 创建目录
+            auto s = LustreFile::SetStripedDirectory(dataDir, stripeCount_, stripeSize_, 0755);
+            if (s.Failure()) {
+                UC_WARN("LustreSpaceLayout::Setup - Failed to create striped directory {}, "
+                        "falling back to normal directory: {}", dataDir, s.ToString());
+                // 回退到普通目录创建
+                if (auto s2 = LustreFile::MkDir(dataDir, 0755); s2.Failure()) {
+                    UC_ERROR("LustreSpaceLayout::Setup - Failed to create data directory {}: {}",
+                             dataDir, s2.ToString());
+                    return s2;
+                }
+            }
+        } else {
+            // 不启用条带化，使用普通目录创建
+            if (auto s = LustreFile::MkDir(dataDir, 0755); s.Failure()) {
+                UC_ERROR("LustreSpaceLayout::Setup - Failed to create data directory {}: {}",
+                         dataDir, s.ToString());
+                return s;
+            }
         }
     }
 

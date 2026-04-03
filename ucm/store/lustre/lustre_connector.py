@@ -50,12 +50,12 @@ class UcmLustreTask(Task):
 class UcmLustreStore(UcmKVStoreBaseV1):
     """
     Lustre Store implementation for UCM.
-    
+
     This store is optimized for Lustre parallel filesystem with features:
     - Stripe-aware I/O for parallel access
     - OST (Object Storage Target) optimization
     - Large-scale distributed storage support
-    
+
     Configuration options:
         storage_backends: List of Lustre mount paths
         device_id: GPU/NPU device ID (-1 for CPU only)
@@ -66,9 +66,41 @@ class UcmLustreStore(UcmKVStoreBaseV1):
         lustre_data_trans_concurrency: Data transfer concurrency (default: 16)
         lustre_lookup_concurrency: Lookup concurrency (default: 8)
         timeout_ms: Timeout in milliseconds (default: 30000)
-        data_dir_shard_bytes: Data directory shard bytes (default: 2)
-        stripe_count: Lustre stripe count, 0 for default (default: 0)
-        stripe_size: Lustre stripe size in bytes, 0 for default (default: 0)
+        data_dir_shard_bytes: Data directory shard bytes (default: 0, flat structure)
+        stripe_count: Lustre stripe count for directory-level striping (default: 0)
+            - 0: No striping, use normal directory creation
+            - >0: Enable directory-level striping with specified stripe count
+            - All files created under the data directory will inherit stripe attributes
+        stripe_size: Lustre stripe size in bytes for directory-level striping (default: 0)
+            - 0: Use filesystem default (typically 1MB)
+            - >0: Use specified stripe size
+            - Only effective when stripe_count > 0
+
+        # P2: Performance optimization options
+        enable_async_io: Enable async I/O (default: True)
+        async_io_backend: Async I/O backend type - "threadpool", "ioruring", "libaio" (default: "threadpool")
+        async_io_queue_depth: Async I/O queue depth (default: 256)
+        lustre_lookup_cpu_cores: Lookup thread CPU affinity, -1=auto, -2=no binding (default: -1)
+        lustre_data_trans_cpu_cores: DataTrans thread CPU affinity (default: -1)
+
+    Striping Configuration:
+        When stripe_count > 0, the data directory will be created with Lustre striping
+        attributes. All KV cache files stored under this directory will automatically
+        inherit the stripe configuration, enabling parallel I/O across multiple OSTs.
+
+        Example configuration for striped storage:
+            config = {
+                "storage_backends": ["/lustre/mount"],
+                "stripe_count": 4,        # Use 4 OSTs in parallel
+                "stripe_size": 1048576,   # 1MB stripe size
+            }
+
+        To verify striping is active:
+            $ lfs getstripe <data_directory>
+            $ lfs getstripe <cache_file>
+
+        Note: Striping is only effective on actual Lustre filesystems. On non-Lustre
+        filesystems, the configuration is ignored and normal directory creation is used.
     """
     
     def __init__(self, config: Dict):

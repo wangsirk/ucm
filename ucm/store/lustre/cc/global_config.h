@@ -53,6 +53,14 @@
 #define LUSTRE_DEFAULT_TRANS_CONCURRENCY 16 // 默认传输并发数
 #define LUSTRE_DEFAULT_LOOKUP_CONCURRENCY 8 // 默认查找并发数
 
+// P2: 异步I/O配置
+#define LUSTRE_DEFAULT_ASYNC_IO_BACKEND "threadpool"  // 默认异步I/O后端
+#define LUSTRE_DEFAULT_QUEUE_DEPTH 256                // 默认队列深度
+
+// P2: CPU亲和性配置
+#define LUSTRE_DEFAULT_LOOKUP_CPU_CORES -1     // 默认不绑定CPU (-1=自动)
+#define LUSTRE_DEFAULT_TRANS_CPU_CORES -1      // 默认不绑定CPU
+
 namespace UC::LustreStore {
 
 /**
@@ -69,9 +77,19 @@ struct Config {
     size_t lookupConcurrency{LUSTRE_DEFAULT_LOOKUP_CONCURRENCY};     // 查找并发度
     size_t timeoutMs{30000};                            // 操作超时时间，单位毫秒
     size_t dataDirShardBytes{0};                        // 数据目录分片字节数 (0=不分片，直接存data目录)
+
     // Lustre特有配置
     int stripeCount{LUSTRE_DEFAULT_STRIPE_COUNT};       // 条带数量
     size_t stripeSize{LUSTRE_DEFAULT_STRIPE_SIZE};      // 条带大小
+
+    // P2: 异步I/O配置
+    std::string asyncIoBackend{LUSTRE_DEFAULT_ASYNC_IO_BACKEND};  // 异步I/O后端类型
+    size_t asyncIoQueueDepth{LUSTRE_DEFAULT_QUEUE_DEPTH};          // 异步I/O队列深度
+    bool enableAsyncIo{true};                        // 是否启用异步I/O
+
+    // P2: CPU亲和性配置
+    int lookupCpuCores{LUSTRE_DEFAULT_LOOKUP_CPU_CORES};    // Lookup线程CPU亲和性 (-1=自动, -2=不绑定)
+    int dataTransCpuCores{LUSTRE_DEFAULT_TRANS_CPU_CORES};  // DataTrans线程CPU亲和性
 };
 
 }  // namespace UC::LustreStore

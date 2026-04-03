@@ -31,6 +31,8 @@
 #include "thread/latch.h"
 #include "thread/thread_pool.h"
 #include "trans_task.h"
+#include "async_io.h"  // P2: 异步 I/O 支持
+#include "lustre_file.h"  // 需要 LustreFile 定义
 
 namespace UC::LustreStore {
 
@@ -62,7 +64,6 @@ private:
         Detail::TaskHandle owner;        // 所属任务 ID
         TransTask::Type type;            // 任务类型
         std::shared_ptr<Latch> waiter;    // 完成通知
-        bool firstIo{false};             // 是否为第一个 I/O
 
         // ===== P1-1.2: Shard 跟踪字段 =====
         size_t totalShards{1};           // Block 的总 Shard 数
@@ -102,6 +103,10 @@ private:
     size_t nShardPerBlock_;
     bool ioDirect_;
 
+    // P2: 异步 I/O 支持
+    std::unique_ptr<AsyncIOAdapter> asyncIo_;
+    bool enableAsyncIo_{false};
+
 public:
     /**
      * 初始化传输队列
@@ -124,7 +129,7 @@ private:
      * - 文件偏移
      * - I/O 大小
      */
-    std::vector<std::unique_ptr<ExtendedIoUnit>> SplitTask(const TransTask& task);
+    std::vector<std::shared_ptr<ExtendedIoUnit>> SplitTask(const TransTask& task);
 
     /**
      * P1-1.2: 提交文件 - 当所有 Shard 写入完成后
@@ -136,12 +141,36 @@ private:
     /**
      * Host to Storage - 将数据写入磁盘 (Dump)
      */
-    Status H2S(ExtendedIoUnit& ios);
+    Status H2S(const std::shared_ptr<ExtendedIoUnit>& ios);
+
+    /**
+     * P2: 同步 H2S 实现
+     */
+    Status H2SSync(const std::shared_ptr<ExtendedIoUnit>& ios, const std::string& tmpPath, LustreFile& file);
+
+    /**
+     * P2: 异步 H2S 实现
+     */
+    Status H2SAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
+                    const std::string& tmpPath,
+                    const std::shared_ptr<LustreFile>& file);
 
     /**
      * Storage to Host - 从磁盘读取数据 (Load)
      */
-    Status S2H(ExtendedIoUnit& ios);
+    Status S2H(const std::shared_ptr<ExtendedIoUnit>& ios);
+
+    /**
+     * P2: 同步 S2H 实现
+     */
+    Status S2HSync(const std::shared_ptr<ExtendedIoUnit>& ios, const std::string& finalPath, LustreFile& file);
+
+    /**
+     * P2: 异步 S2H 实现
+     */
+    Status S2HAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
+                    const std::string& finalPath,
+                    const std::shared_ptr<LustreFile>& file);
 };
 
 }  // namespace UC::LustreStore

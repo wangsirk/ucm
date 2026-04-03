@@ -40,6 +40,8 @@ class SpaceLayout {
     std::vector<std::string> storageBackends_;
     bool dataDirShard_;
     size_t dataDirShardBytes_;
+    int stripeCount_;      // 条带数量 (0 = 不启用)
+    size_t stripeSize_;    // 条带大小 (字节)
 
 public:
     /**

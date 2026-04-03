@@ -93,15 +93,7 @@ private:
             return Status::InvalidParam("invalid shard bytes({})", cfg.dataDirShardBytes);
         }
         if (cfg.deviceId == -1) { return Status::OK(); }
-        
-        // TODO: 添加更多配置验证
-        // if (cfg.tensorSize == 0 || cfg.shardSize < cfg.tensorSize ||
-        //     cfg.blockSize < cfg.shardSize || cfg.shardSize % cfg.tensorSize != 0 ||
-        //     cfg.blockSize % cfg.shardSize != 0) {
-        //     return Status::InvalidParam("invalid size({},{},{})", 
-        //                                 cfg.tensorSize, cfg.shardSize, cfg.blockSize);
-        // }
-        
+
         return Status::OK();
     }
     
@@ -142,11 +134,20 @@ Status LustreStore::Setup(const Detail::Dictionary& config)
     config.GetNumber("lustre_lookup_concurrency", param.lookupConcurrency);
     config.GetNumber("timeout_ms", param.timeoutMs);
     config.GetNumber("data_dir_shard_bytes", param.dataDirShardBytes);
-    
+
     // Lustre特定配置
     config.GetNumber("stripe_count", param.stripeCount);
     config.GetNumber("stripe_size", param.stripeSize);
-    
+
+    // P2: 异步 I/O 配置
+    config.Get("enable_async_io", param.enableAsyncIo);
+    config.Get("async_io_backend", param.asyncIoBackend);
+    config.GetNumber("async_io_queue_depth", param.asyncIoQueueDepth);
+
+    // P2: CPU 亲和性配置
+    config.GetNumber("lustre_lookup_cpu_cores", param.lookupCpuCores);
+    config.GetNumber("lustre_data_trans_cpu_cores", param.dataTransCpuCores);
+
     try {
         impl_ = std::make_shared<LustreStoreImpl>();
     } catch (const std::exception& e) {

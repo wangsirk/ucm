@@ -75,12 +75,6 @@ private:
      * @return 1=存在, 0=不存在
      */
     uint8_t LookupSingle(const Detail::BlockId* block);
-    /**
-     * 单个Block查找
-     * @param block Block ID
-     * @return 是否存在
-     */
-    uint8_t Lookup(const Detail::BlockId* block);
 };
 
 }  // namespace UC::LustreStore

@@ -142,6 +142,26 @@ public:
     static Status MkDir(const std::string& path, mode_t mode = 0755);
 
     /**
+     * 设置目录为条带化目录 (静态方法)
+     *
+     * 为目录设置 Lustre 条带化属性，该目录下创建的所有文件将自动继承条带属性。
+     * 使用 llapi_dir_create() 创建带有条带属性的目录，这是 Lustre 推荐的目录条带化 API。
+     *
+     * 注意: llapi_dir_create() 会同时创建目录，调用前目录不应存在。
+     *       如果目录已存在，函数会返回 EEXIST/EALREADY 但被视为成功。
+     *
+     * @param path 目录路径
+     * @param stripeCount 条带数量 (0 = 不启用条带化)
+     * @param stripeSize 条带大小 (字节，0 = 使用文件系统默认 1MB)
+     * @param mode 目录权限
+     * @return Status 操作状态
+     */
+    static Status SetStripedDirectory(const std::string& path,
+                                      int stripeCount,
+                                      size_t stripeSize,
+                                      mode_t mode = 0755);
+
+    /**
      * 检查文件/目录访问权限
      *
      * @param mode 访问模式 (F_OK, R_OK, W_OK, X_OK)

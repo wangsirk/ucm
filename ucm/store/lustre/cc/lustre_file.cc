@@ -76,14 +76,14 @@ Status LustreFile::CreateStriped(int stripeCount, size_t stripeSize, mode_t mode
 
     // 设置条带参数
     if (stripeCount > 0) {
-        llapi_layout_stripe_count_set(layout, stripeCount, 0);
+        llapi_layout_stripe_count_set(layout, stripeCount);
     }
     if (stripeSize > 0) {
         llapi_layout_stripe_size_set(layout, stripeSize);
     }
 
-    // 创建文件
-    int rc = llapi_layout_create(path_.c_str(), layout, mode);
+    // 创建文件 (layout 参数在最后)
+    int rc = llapi_layout_file_create(path_.c_str(), O_CREAT | O_WRONLY | O_EXCL, mode, layout);
     llapi_layout_free(layout);
 
     if (rc != 0) {
@@ -247,6 +247,80 @@ Status LustreFile::MkDir(const std::string& path, mode_t mode)
 
     UC_ERROR("Failed to create directory {}: {}", path, strerror(error));
     return Status::OsApiError(std::string("mkdir failed: ") + strerror(error));
+}
+
+Status LustreFile::SetStripedDirectory(const std::string& path,
+                                       int stripeCount,
+                                       size_t stripeSize,
+                                       mode_t mode)
+{
+#ifdef HAVE_LUSTRE_API
+    // stripeCount 为 0 时不启用条带化
+    if (stripeCount <= 0) {
+        UC_DEBUG("Stripe count is {}, skipping striping setup for {}", stripeCount, path);
+        return Status::OK();
+    }
+
+    // 简化方案：在父目录（backend）设置条带属性
+    // data 子目录会自动继承父目录的条带属性
+    // 例如：/mnt/lustre47/demo 设置条带化，/mnt/lustre47/demo/data 自动继承
+
+    // 从路径中提取父目录（去掉 /data 后缀）
+    std::string parentPath = path;
+    const std::string dataSuffix = "/data";
+    if (parentPath.length() > dataSuffix.length() &&
+        parentPath.substr(parentPath.length() - dataSuffix.length()) == dataSuffix) {
+        parentPath = parentPath.substr(0, parentPath.length() - dataSuffix.length());
+    }
+
+    // 步骤 1: 创建父目录
+    auto s = MkDir(parentPath, mode);
+    if (s.Failure()) {
+        UC_ERROR("Failed to create parent directory {}: {}", parentPath, s.ToString());
+        return s;
+    }
+
+    // 步骤 2: 使用 lfs setstripe 设置条带属性
+    // 构造命令: lfs setstripe <parentPath> -c <stripeCount> -S <stripeSize>
+    std::string cmd = "lfs setstripe " + parentPath + " -c " + std::to_string(stripeCount) +
+                      " -S " + std::to_string(stripeSize) + " 2>&1";
+
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (pipe) {
+        char buffer[256];
+        std::string output;
+        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            output += buffer;
+        }
+        int status = pclose(pipe);
+
+        if (status != 0) {
+            // 检查是否是因为条带属性已存在
+            if (output.find("stripe already set") != std::string::npos ||
+                output.find("existing stripe") != std::string::npos) {
+                UC_INFO("Parent directory {} already has stripe attributes", parentPath);
+            } else {
+                UC_WARN("lfs setstripe command failed for {}: {}", parentPath, output);
+            }
+        } else {
+            UC_INFO("Set stripe attributes on parent directory {} (stripe_count={}, stripe_size={})",
+                    parentPath, stripeCount, stripeSize);
+        }
+    }
+
+    // 步骤 3: 创建 data 子目录（自动继承条带属性）
+    s = MkDir(path, mode);
+    if (s.Failure()) {
+        UC_WARN("Failed to create data directory {}: {}", path, s.ToString());
+        // 不返回错误，因为父目录已设置条带属性
+    }
+
+    return Status::OK();
+#else
+    // 非 Lustre 环境，返回 OK（no-op）
+    UC_DEBUG("Lustre API not available, skipping striping setup for {}", path);
+    return Status::OK();
+#endif
 }
 
 bool LustreFile::Access(int32_t mode) const
