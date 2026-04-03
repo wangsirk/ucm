@@ -389,3 +389,164 @@ class TestResourceCleanup:
             logger.info(f"✅ [P0-7.2] 资源清理 - 通过 (指针: {store.cc_store()})")
         finally:
             del store
+
+
+# ===== 8. 目录预创建行为测试 =====
+
+class TestDirectoryPrecreation:
+    """P0-8: 目录预创建行为验证
+
+    测试目标：
+    - 验证 dataDirShardBytes > 0 时预创建所有分片目录
+    - 验证行为与 PosixStore 一致
+    """
+
+    def test_shard_directories_precreated_with_shard_bytes_1(self):
+        """[P0-8.1] dataDirShardBytes=1 时预创建 16 个分片目录（直接在 backend 下）
+
+        验证点：
+        - dataDirShardBytes=1 时创建 16 个目录 (0-f)，直接在 backend 下
+        - 不创建 data 子目录
+        - 目录在 Setup 时就存在，不需要等到文件写入
+        """
+        backend = "/mnt/lustre47/test_shard_1"
+        os.makedirs(backend, exist_ok=True)
+
+        try:
+            config = {
+                "store_pipeline": "Lustre",
+                "storage_backends": [backend],
+                "device_id": -1,
+                "tensor_size": 100,
+                "shard_size": 100,
+                "block_size": 100,
+                "data_dir_shard_bytes": 1,  # 应该创建 16 个目录
+            }
+
+            store = UcmPipelineStore(config)
+
+            # 验证没有 data 子目录
+            data_dir = os.path.join(backend, "data")
+            assert not os.path.exists(data_dir), "❌ 不应存在 data 子目录"
+
+            # 验证 16 个分片目录直接在 backend 下 (0-f)
+            expected_dirs = 16
+            created_dirs = []
+            for i in range(16):
+                shard_dir = os.path.join(backend, f"{i:x}")
+                if os.path.exists(shard_dir):
+                    created_dirs.append(shard_dir)
+
+            assert len(created_dirs) == expected_dirs, \
+                f"❌ 应创建 {expected_dirs} 个分片目录，实际创建 {len(created_dirs)} 个"
+
+            log_test_info(
+                "P0-8.1",
+                f"dataDirShardBytes=1 预创建 {len(created_dirs)} 个分片目录（直接在 backend 下）",
+                "PASS"
+            )
+
+            del store
+        finally:
+            # 清理
+            import shutil
+            if os.path.exists(backend):
+                shutil.rmtree(backend, ignore_errors=True)
+
+    def test_shard_directories_precreated_with_shard_bytes_2(self):
+        """[P0-8.2] dataDirShardBytes=2 时预创建 256 个分片目录（直接在 backend 下）
+
+        验证点：
+        - dataDirShardBytes=2 时创建 256 个目录 (00-ff)，直接在 backend 下
+        - 目录在 Setup 时就存在
+        """
+        backend = "/mnt/lustre47/test_shard_2"
+        os.makedirs(backend, exist_ok=True)
+
+        try:
+            config = {
+                "store_pipeline": "Lustre",
+                "storage_backends": [backend],
+                "device_id": -1,
+                "tensor_size": 100,
+                "shard_size": 100,
+                "block_size": 100,
+                "data_dir_shard_bytes": 2,  # 应该创建 256 个目录
+            }
+
+            store = UcmPipelineStore(config)
+
+            # 验证没有 data 子目录
+            data_dir = os.path.join(backend, "data")
+            assert not os.path.exists(data_dir), "❌ 不应存在 data 子目录"
+
+            # 抽样验证：检查几个代表性的分片目录（直接在 backend 下）
+            sample_shards = ["00", "7f", "ff", "10", "a5"]
+            for shard in sample_shards:
+                shard_dir = os.path.join(backend, shard)
+                assert os.path.exists(shard_dir), f"❌ 分片目录 {shard_dir} 不存在"
+
+            # 统计实际创建的目录数量
+            created_dirs = [d for d in os.listdir(backend) if os.path.isdir(os.path.join(backend, d))]
+            expected_dirs = 256
+
+            assert len(created_dirs) == expected_dirs, \
+                f"❌ 应创建 {expected_dirs} 个分片目录，实际创建 {len(created_dirs)} 个"
+
+            log_test_info(
+                "P0-8.2",
+                f"dataDirShardBytes=2 预创建 {len(created_dirs)} 个分片目录",
+                "PASS"
+            )
+
+            del store
+        finally:
+            # 清理
+            import shutil
+            if os.path.exists(backend):
+                shutil.rmtree(backend, ignore_errors=True)
+
+    def test_flat_structure_with_shard_bytes_0(self):
+        """[P0-8.3] dataDirShardBytes=0 时只创建 data 目录（扁平化）
+
+        验证点：
+        - dataDirShardBytes=0 时只创建 data 目录
+        - 不创建任何分片子目录
+        """
+        backend = "/mnt/lustre47/test_flat"
+        os.makedirs(backend, exist_ok=True)
+
+        try:
+            config = {
+                "store_pipeline": "Lustre",
+                "storage_backends": [backend],
+                "device_id": -1,
+                "tensor_size": 100,
+                "shard_size": 100,
+                "block_size": 100,
+                "data_dir_shard_bytes": 0,  # 扁平化结构
+            }
+
+            store = UcmPipelineStore(config)
+
+            # 验证只有 data 目录存在
+            data_dir = os.path.join(backend, "data")
+            assert os.path.exists(data_dir), "❌ data 目录不存在"
+
+            # 验证没有分片子目录
+            subdirs = [d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]
+            assert len(subdirs) == 0, \
+                f"❌ 扁平化模式下不应有分片目录，但找到了: {subdirs}"
+
+            log_test_info(
+                "P0-8.3",
+                "dataDirShardBytes=0 扁平化结构正确",
+                "PASS"
+            )
+
+            del store
+        finally:
+            # 清理
+            import shutil
+            if os.path.exists(backend):
+                shutil.rmtree(backend, ignore_errors=True)

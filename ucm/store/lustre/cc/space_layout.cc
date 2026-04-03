@@ -42,6 +42,36 @@ namespace UC::LustreStore {
 namespace {
 
 /**
+ * 生成 n 位十六进制的所有可能组合
+ *
+ * 注意：这里的 n 是十六进制字符数（每个字符=4位）
+ * n=0: 返回空（表示扁平化结构）
+ * n=1: 16个目录 (0-f)
+ * n=2: 256个目录 (00-ff)
+ * n=3: 4096个目录 (000-fff)
+ *
+ * 与 PosixStore::GenerateHexStrings 保持一致
+ */
+std::vector<std::string> GenerateHexStrings(size_t n)
+{
+    if (n == 0) [[unlikely]] { return {}; }
+    size_t nCombinations = 1ULL << (n * 4);  // 16^n 种组合
+    std::vector<std::string> result;
+    result.reserve(nCombinations);
+    constexpr char hexChars[] = "0123456789abcdef";
+    for (size_t i = 0; i < nCombinations; ++i) {
+        std::string s(n, '0');
+        auto temp = i;
+        for (int j = n - 1; j >= 0; --j) {
+            s[j] = hexChars[temp & 0xF];
+            temp >>= 4;
+        }
+        result.push_back(s);
+    }
+    return result;
+}
+
+/**
  * 将 BlockId 转换为十六进制字符串
  *
  * BlockId 是 16 字节的 SHA-256 前缀
@@ -58,28 +88,6 @@ std::string BlockIdToHex(const Detail::BlockId& blockId)
     }
 
     return oss.str();
-}
-
-/**
- * 生成分片路径
- *
- * 根据配置的 dataDirShardBytes 生成目录分片
- * 例如: "00/00/00/" 当 dataDirShardBytes=3
- */
-std::string GetShardPath(const std::string& hexHash, size_t shardBytes)
-{
-    if (shardBytes == 0) {
-        return "";
-    }
-
-    std::string path;
-    for (size_t i = 0; i < shardBytes; ++i) {
-        if (i > 0) path += "/";
-        path += hexHash.substr(i * 2, 2);
-    }
-    path += "/";
-
-    return path;
 }
 
 /**
@@ -115,31 +123,44 @@ Status SpaceLayout::Setup(const Config& config)
         return Status::InvalidParam("storageBackends cannot be empty");
     }
 
-    // 创建基础目录结构（仅创建 data 目录，不预先创建分片目录）
-    // 分片目录将按需创建（lazy creation）
-    for (const auto& backend : storageBackends_) {
-        std::string dataDir = backend + "/data";
+    // 创建基础目录结构（与 PosixStore 保持一致）
+    // - dataDirShardBytes = 0: 创建 backend/data/
+    // - dataDirShardBytes > 0: 创建 backend/00/, backend/01/, ..., backend/ff/ (直接在 backend 下)
+    //
+    // 条带化策略：
+    // - 当 stripeCount_ > 0 时，直接在 backend 目录上设置条带属性
+    // - 之后在该目录下创建的所有文件都会自动继承条带属性
+    // - 分片子目录不需要单独设置条带（会自动继承父目录）
 
-        // 根据条带配置选择目录创建方式
+    for (const auto& backend : storageBackends_) {
+        // 第一步：当启用条带化时，在 backend 目录上设置条带属性
         if (stripeCount_ > 0) {
-            // 使用条带化目录创建
-            // SetStripedDirectory 内部使用 llapi_layout_file_create() 创建目录
-            auto s = LustreFile::SetStripedDirectory(dataDir, stripeCount_, stripeSize_, 0755);
+            auto s = LustreFile::SetStripedDirectory(backend, stripeCount_, stripeSize_, 0755);
             if (s.Failure()) {
-                UC_WARN("LustreSpaceLayout::Setup - Failed to create striped directory {}, "
-                        "falling back to normal directory: {}", dataDir, s.ToString());
-                // 回退到普通目录创建
-                if (auto s2 = LustreFile::MkDir(dataDir, 0755); s2.Failure()) {
-                    UC_ERROR("LustreSpaceLayout::Setup - Failed to create data directory {}: {}",
-                             dataDir, s2.ToString());
-                    return s2;
-                }
+                UC_WARN("LustreSpaceLayout::Setup - Failed to set stripe on backend {}, "
+                        "continuing with normal directory: {}", backend, s.ToString());
+                // 即使设置条带失败，也继续创建目录
+            } else {
+                UC_INFO("LustreSpaceLayout::Setup - Set stripe on backend directory {} "
+                        "(stripe_count={}, stripe_size={})",
+                        backend, stripeCount_, stripeSize_);
             }
-        } else {
-            // 不启用条带化，使用普通目录创建
-            if (auto s = LustreFile::MkDir(dataDir, 0755); s.Failure()) {
-                UC_ERROR("LustreSpaceLayout::Setup - Failed to create data directory {}: {}",
-                         dataDir, s.ToString());
+        }
+
+        // 第二步：创建分片目录（会自动继承父目录的条带属性）
+        auto relativeRoots = RelativeRoots();
+
+        for (const auto& relativeRoot : relativeRoots) {
+            std::string fullPath = backend + "/" + relativeRoot;
+
+            // 使用普通目录创建（如果父目录已设置条带，子目录会自动继承）
+            auto s = LustreFile::MkDir(fullPath, 0755);
+            if (s == Status::DuplicateKey()) {
+                s = Status::OK();  // 目录已存在，忽略错误
+            }
+            if (s.Failure()) {
+                UC_ERROR("LustreSpaceLayout::Setup - Failed to create directory {}: {}",
+                         fullPath, s.ToString());
                 return s;
             }
         }
@@ -160,11 +181,18 @@ std::string SpaceLayout::DataFilePath(const Detail::BlockId& blockId, bool activ
     // 2. 转换 BlockId 为十六进制
     std::string hexHash = BlockIdToHex(blockId);
 
-    // 3. 生成分片路径
-    std::string shardPath = GetShardPath(hexHash, dataDirShardBytes_);
+    // 3. 确定分片目录路径（与 PosixStore 保持一致）
+    std::string shardPath;
+    if (dataDirShard_) {
+        // 分片模式：直接使用分片目录（如 "00", "7f", "ff"）
+        shardPath = FileShardName(hexHash) + "/";
+    } else {
+        // 扁平化模式：使用 data 子目录
+        shardPath = "data/";
+    }
 
     // 4. 构建完整路径
-    std::string path = backend + "/data/" + shardPath + hexHash;
+    std::string path = backend + "/" + shardPath + hexHash;
 
     // 5. 如果是临时文件，添加 .tmp.{pid} 后缀
     if (activated) {
@@ -222,11 +250,15 @@ Status SpaceLayout::CommitFile(const Detail::BlockId& blockId, bool success) con
 
 std::vector<std::string> SpaceLayout::RelativeRoots() const
 {
-    std::vector<std::string> roots;
-    for (const auto& backend : storageBackends_) {
-        roots.push_back(backend + "/data");
+    // 与 PosixStore 保持一致：
+    // - 当 dataDirShardBytes_ == 0 时，返回 {"data"}（使用 data 子目录）
+    // - 当 dataDirShardBytes_ > 0 时，返回所有分片目录（直接在 backend 下创建，如 "00", "01", ..., "ff"）
+    if (!dataDirShard_) {
+        return {"data"};
     }
-    return roots;
+
+    // 生成所有分片目录名（不包含 data/ 前缀）
+    return GenerateHexStrings(dataDirShardBytes_);
 }
 
 Status SpaceLayout::AddStorageBackend(const std::string& path)

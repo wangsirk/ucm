@@ -51,6 +51,7 @@ def test_lustre_store_creation():
         "block_size": 512,
         "tensor_size": 512,
         "shard_size": 512,
+        "data_dir_shard_bytes": 1,  # 创建 16 个分片目录 (0-f)
         "stripe_count": 2,  # 启用条带化，2个OST
         "stripe_size": 1048576,  # 1MB 条带大小
     }
