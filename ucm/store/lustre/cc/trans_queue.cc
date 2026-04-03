@@ -304,16 +304,23 @@ Status TransQueue::H2SAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
                              const std::shared_ptr<LustreFile>& file)
 {
     // 提交异步写请求
-    // 重要：捕获 shared_ptr (而非 weak_ptr) 确保 ExtendedIoUnit 在回调执行前不会被销毁
+    // 修复 P0: 使用 weak_ptr 避免循环引用
     int fd = file->GetFd();
+    std::weak_ptr<ExtendedIoUnit> weakIos = ios->WeakPtr();
+
     IoRequest req(
         fd,
         ios->srcAddr,
         ios->ioSize,
         static_cast<off64_t>(ios->fileOffset),
         true,  // isWrite
-        [this, ios, tmpPath, file](IoRequest::Result result, ssize_t bytesTransferred) {
-            // ios 是 shared_ptr，保证对象在整个回调期间存活
+        [this, weakIos, tmpPath](IoRequest::Result result, ssize_t bytesTransferred) {
+            // 尝试获取 shared_ptr，如果对象已被销毁则跳过
+            auto ios = weakIos.lock();
+            if (!ios) {
+                UC_WARN("LustreTransQueue::H2SAsync - IoUnit already destroyed, skipping callback");
+                return;
+            }
 
             if (result == IoRequest::Result::FAILURE) {
                 UC_ERROR("LustreTransQueue::H2SAsync - Async write failed");
@@ -350,26 +357,33 @@ Status TransQueue::H2SAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
     if (s.Failure()) {
         // 回退到同步 I/O（确保文件正确关闭）
         UC_WARN("Async submit failed, falling back to sync I/O: {}", s.ToString());
-        LustreFile file(tmpPath);
-        Status openStatus = file.Open(O_WRONLY | O_APPEND);
+        LustreFile fallbackFile(tmpPath);
+        Status openStatus = fallbackFile.Open(O_WRONLY | O_APPEND);
         if (openStatus.Failure()) {
             UC_ERROR("Failed to open file in fallback mode: {}", openStatus.ToString());
             if (ios->waiter) { ios->waiter->Done(); }
             return openStatus;
         }
         // H2SSync 内部会关闭文件
-        return H2SSync(ios, tmpPath, file);
+        return H2SSync(ios, tmpPath, fallbackFile);
     }
 
-    // 等待异步操作完成，确保回调被处理
-    // 轮询等待 completed 标志，同时处理完成队列
+    // 修复 P0: 使用事件驱动等待 + 主动检查结合，避免死锁和 CPU 浪费
     const int maxWaitMs = 5000;  // 最大等待 5 秒
-    const int pollIntervalMs = 1; // 每次轮询间隔 1ms
+    const int checkIntervalMs = 10;  // 每 10ms 检查一次完成队列
     int waitedMs = 0;
 
+    // 先处理已有的完成事件
+    asyncIo_->ProcessCompletion(0);
+
+    // 使用条件变量等待，但定期检查完成队列
     while (!ios->IsCompleted() && waitedMs < maxWaitMs) {
-        asyncIo_->ProcessCompletion(pollIntervalMs);
-        waitedMs += pollIntervalMs;
+        // 等待一小段时间或直到被通知
+        if (!ios->WaitForCompletion(checkIntervalMs)) {
+            // 超时了，主动处理一次完成队列
+            asyncIo_->ProcessCompletion(0);
+        }
+        waitedMs += checkIntervalMs;
     }
 
     if (!ios->IsCompleted()) {
@@ -460,16 +474,23 @@ Status TransQueue::S2HAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
                              const std::shared_ptr<LustreFile>& file)
 {
     // 提交异步读请求
-    // 重要：捕获 shared_ptr (而非 weak_ptr) 确保 ExtendedIoUnit 在回调执行前不会被销毁
+    // 修复 P0: 使用 weak_ptr 避免循环引用
     int fd = file->GetFd();
+    std::weak_ptr<ExtendedIoUnit> weakIos = ios->WeakPtr();
+
     IoRequest req(
         fd,
         ios->dstAddr,
         ios->ioSize,
         static_cast<off64_t>(ios->fileOffset),
         false,  // isWrite = false (读)
-        [this, ios, file](IoRequest::Result result, ssize_t bytesTransferred) {
-            // ios 是 shared_ptr，保证对象在整个回调期间存活
+        [this, weakIos](IoRequest::Result result, ssize_t bytesTransferred) {
+            // 尝试获取 shared_ptr，如果对象已被销毁则跳过
+            auto ios = weakIos.lock();
+            if (!ios) {
+                UC_WARN("LustreTransQueue::S2HAsync - IoUnit already destroyed, skipping callback");
+                return;
+            }
 
             // 回调函数
             if (result == IoRequest::Result::FAILURE) {
@@ -494,9 +515,35 @@ Status TransQueue::S2HAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
         return S2HSync(ios, finalPath, *file);
     }
 
-    // 处理完成队列（非阻塞）
+    // 修复 P0: 等待异步操作完成（之前直接返回导致数据未加载）
+    const int maxWaitMs = 5000;  // 最大等待 5 秒
+    const int checkIntervalMs = 10;  // 每 10ms 检查一次完成队列
+    int waitedMs = 0;
+
+    // 先处理已有的完成事件
     asyncIo_->ProcessCompletion(0);
 
+    // 使用条件变量等待，但定期检查完成队列
+    while (!ios->IsCompleted() && waitedMs < maxWaitMs) {
+        if (!ios->WaitForCompletion(checkIntervalMs)) {
+            asyncIo_->ProcessCompletion(0);
+        }
+        waitedMs += checkIntervalMs;
+    }
+
+    if (!ios->IsCompleted()) {
+        UC_ERROR("LustreTransQueue::S2HAsync - Async read timeout after {}ms", waitedMs);
+        if (ios->waiter) { ios->waiter->Done(); }
+        return Status::OsApiError("Async read timeout");
+    }
+
+    // 检查异步操作的结果
+    if (ios->result.Failure()) {
+        UC_ERROR("LustreTransQueue::S2HAsync - Async read failed: {}", ios->result.ToString());
+        return ios->result;
+    }
+
+    UC_DEBUG("LustreTransQueue::S2HAsync - Async read completed and verified");
     return Status::OK();
 }
 

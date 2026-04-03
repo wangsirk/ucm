@@ -25,6 +25,8 @@
 #define UNIFIEDCACHE_LUSTRE_STORE_CC_TRANS_QUEUE_H
 
 #include <memory>
+#include <mutex>
+#include <condition_variable>
 #include "global_config.h"
 #include "space_layout.h"
 #include "template/hashset.h"
@@ -49,7 +51,7 @@ class TransQueue {
 
 private:
     // 内部使用的扩展 IoUnit (包含 TransQueue 特有字段)
-    struct ExtendedIoUnit {
+    struct ExtendedIoUnit : public std::enable_shared_from_this<ExtendedIoUnit> {
         // ===== IoUnit 核心字段 =====
         Detail::BlockId blockId;
         size_t shardIndex;
@@ -68,6 +70,10 @@ private:
         // ===== P1-1.2: Shard 跟踪字段 =====
         size_t totalShards{1};           // Block 的总 Shard 数
         size_t currentShard{0};          // 当前 Shard 索引 (0-based)
+
+        // ===== 事件驱动同步机制 (修复 P0 轮询 CPU 浪费问题) =====
+        mutable std::mutex cvMutex;      // 保护条件变量的互斥锁
+        mutable std::condition_variable cv;  // 完成事件通知
 
         ExtendedIoUnit() = default;
 
@@ -88,11 +94,32 @@ private:
         void MarkCompleted(const Status& status) noexcept {
             result = status;
             completed.store(true, std::memory_order_release);
+            // 通知等待线程
+            cv.notify_all();
+        }
+
+        // 事件驱动的等待方法 (替代轮询)
+        bool WaitForCompletion(int timeoutMs = -1) const {
+            std::unique_lock<std::mutex> lock(cvMutex);
+            if (timeoutMs < 0) {
+                // 无限等待
+                cv.wait(lock, [this] { return IsCompleted(); });
+                return true;
+            } else {
+                // 超时等待
+                return cv.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+                    [this] { return IsCompleted(); });
+            }
         }
 
         // P1-1.2: 判断是否是最后一个 Shard
         bool IsLastShard() const noexcept {
             return currentShard == totalShards - 1;
+        }
+
+        // 创建 weak_ptr 用于回调捕获 (修复循环引用问题)
+        std::weak_ptr<ExtendedIoUnit> WeakPtr() {
+            return shared_from_this();
         }
     };
 
