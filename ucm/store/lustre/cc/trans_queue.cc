@@ -39,11 +39,28 @@ Status TransQueue::Setup(const Config& config, TaskIdSet* failureSet, const Spac
     UC_INFO("LustreTransQueue::Setup - Async I/O: {}, backend: {}", config.enableAsyncIo, config.asyncIoBackend);
     UC_INFO("LustreTransQueue::Setup - Stripe count: {}, stripe size: {}", config.stripeCount, config.stripeSize);
 
+    // P2.5: Scheduler 侧初始化保护 - 当所有数据传输参数为 0 时，跳过线程池初始化
+    if (config.tensorSize == 0 && config.shardSize == 0 && config.blockSize == 0) {
+        UC_INFO("LustreTransQueue::Setup - Scheduler side initialization detected, skipping thread pool setup");
+        failureSet_ = failureSet;
+        layout_ = layout;
+        ioSize_ = config.tensorSize;
+        shardSize_ = config.shardSize;
+        nShardPerBlock_ = 0;
+        ioDirect_ = config.ioDirect;
+        stripeCount_ = config.stripeCount;
+        stripeSize_ = config.stripeSize;
+        enableAsyncIo_ = false;
+        UC_INFO("LustreTransQueue::Setup - Trans queue initialized successfully (scheduler mode)");
+        return Status::OK();
+    }
+
     failureSet_ = failureSet;
     layout_ = layout;
     ioSize_ = config.tensorSize;
     shardSize_ = config.shardSize;
-    nShardPerBlock_ = config.blockSize / config.shardSize;
+    // 避免 0/0 除法：scheduler 侧初始化时 blockSize 和 shardSize 都是 0
+    nShardPerBlock_ = (config.shardSize > 0) ? (config.blockSize / config.shardSize) : 0;
     ioDirect_ = config.ioDirect;
 
     // P3: 条带化配置

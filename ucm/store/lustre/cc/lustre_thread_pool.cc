@@ -60,11 +60,15 @@ public:
         for (size_t i = 0; i < numWorkers_; ++i) {
             // 计算 CPU 亲和性
             int workerCpu = -1;
+            size_t hwConcurrency = std::thread::hardware_concurrency();
+            if (hwConcurrency == 0) {
+                hwConcurrency = 4;  // 防止除以零
+            }
             if (cpuAffinity_ >= 0) {
-                workerCpu = (cpuAffinity_ + i) % std::thread::hardware_concurrency();
+                workerCpu = (cpuAffinity_ + i) % hwConcurrency;
             } else if (cpuAffinity_ == -2) {
                 // -2 表示自动分配：尽量均匀分布到所有 CPU
-                workerCpu = i % std::thread::hardware_concurrency();
+                workerCpu = i % hwConcurrency;
             }
 
             workers_.emplace_back([this, i, workerCpu]() {

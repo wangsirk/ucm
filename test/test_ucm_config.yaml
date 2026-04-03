@@ -5,9 +5,11 @@
 ucm_connectors:
   - ucm_connector_name: "UcmPipelineStore"
     ucm_connector_config:
-      store_pipeline: "Posix"
+      store_pipeline: "Lustre"
       storage_backends: "/mnt/lustre47/ucm_cache"
       io_direct: false
+      data_dir_shard_bytes: 1    # 创建 16 个分片目录 (0-f)
+
 
 # 启用指标监控（可选）
 # metrics_config_path: "/home/w2938/unified-cache-management/examples/metrics/metrics_configs.yaml"

@@ -224,6 +224,12 @@ class UCMDirectConnector(KVConnectorBase_V1):
             )
             config["block_size"] = chunk_block_size
             config["local_rank_size"] = self.tp_size if shared_data else 1
+        else:
+            # Scheduler side: set default values to avoid division by zero
+            config["device_id"] = -1
+            config["tensor_size"] = 0
+            config["shard_size"] = 0
+            config["block_size"] = 0
         logger.info(f"create {name} with config: {config}")
         return UcmConnectorFactoryV1.create_connector(name, config)
 

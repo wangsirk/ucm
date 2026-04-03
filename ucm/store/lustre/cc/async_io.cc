@@ -206,7 +206,11 @@ struct ThreadPoolBackend::Impl {
             // 如果指定了 CPU 亲和性，尝试均匀分布
             int workerCpu = -1;
             if (cpuAffinity >= 0) {
-                workerCpu = (cpuAffinity + i) % std::thread::hardware_concurrency();
+                size_t hwConcurrency = std::thread::hardware_concurrency();
+                if (hwConcurrency == 0) {
+                    hwConcurrency = 4;  // 防止除以零
+                }
+                workerCpu = (cpuAffinity + i) % hwConcurrency;
             }
 
             workers.emplace_back([this, i, workerCpu]() {
@@ -262,6 +266,11 @@ Status ThreadPoolBackend::Setup(size_t queueDepth, int sqThreadCpu)
 
     // 工作线程数量：基于 CPU 核心数的合理限制
     size_t hardwareConcurrency = std::thread::hardware_concurrency();
+    // 如果 hardwareConcurrency 返回 0，使用默认值 4
+    if (hardwareConcurrency == 0) {
+        hardwareConcurrency = 4;
+        UC_WARN("std::thread::hardware_concurrency() returned 0, using default value 4");
+    }
     size_t maxWorkers = std::max(size_t{4}, hardwareConcurrency * 2);  // 合理上限
 
     size_t numWorkers = std::min({queueDepth, maxWorkers, hardwareConcurrency});
