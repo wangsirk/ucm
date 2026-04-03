@@ -138,6 +138,9 @@ private:
     std::unique_ptr<AsyncIOAdapter> asyncIo_;
     bool enableAsyncIo_{false};
 
+    // 数据传输线程池
+    ThreadPool<std::shared_ptr<ExtendedIoUnit>> pool_;
+
 public:
     /**
      * 初始化传输队列
@@ -161,6 +164,11 @@ private:
      * - I/O 大小
      */
     std::vector<std::shared_ptr<ExtendedIoUnit>> SplitTask(const TransTask& task);
+
+    /**
+     * 线程池工作函数 - 处理单个 IoUnit 的 I/O 操作
+     */
+    void Worker(const std::shared_ptr<ExtendedIoUnit>& ios);
 
     /**
      * P1-1.2: 提交文件 - 当所有 Shard 写入完成后

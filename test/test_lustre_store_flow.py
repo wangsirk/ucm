@@ -109,7 +109,12 @@ def run_lustre_store_flow_test(store):
     dump_task = store.dump(block_ids, shard_index, dummy_tensor)
     print(f"dump 任务创建: task_id={dump_task.task_id}")
     print("✅ dump 流程完成 (打印语句并返回)")
-    
+
+    # 等待 dump 完成（使用线程池后 I/O 是异步的）
+    print("\n--- 等待 dump 完成 ---")
+    store.wait(dump_task)
+    print("✅ dump 完成，数据已写入磁盘")
+
     # 测试 load (模拟从存储读取 token 数据)
     print("\n--- 测试 load ---")
     # 初始化目标 tensor 为全0

@@ -65,6 +65,17 @@ Status TransQueue::Setup(const Config& config, TaskIdSet* failureSet, const Spac
         }
     }
 
+    // 启动数据传输线程池
+    auto success = pool_.SetNWorker(config.dataTransConcurrency)
+                       .SetWorkerFn([this](auto& ios, auto&) { Worker(ios); })
+                       .Run();
+    if (!success) {
+        UC_ERROR("LustreTransQueue::Setup - Failed to start thread pool with {} workers",
+                 config.dataTransConcurrency);
+        return Status::Error(fmt::format("Failed to start thread pool"));
+    }
+    UC_INFO("LustreTransQueue::Setup - Thread pool started with {} workers", config.dataTransConcurrency);
+
     UC_INFO("LustreTransQueue::Setup - Trans queue initialized successfully");
     return Status::OK();
 }
@@ -148,6 +159,27 @@ TransQueue::SplitTask(const TransTask& task)
 }
 
 // ============================================================================
+// Worker 方法 - 线程池工作函数
+// ============================================================================
+
+void TransQueue::Worker(const std::shared_ptr<ExtendedIoUnit>& ios)
+{
+    // 快速失败检查：如果任务已失败，直接返回
+    if (failureSet_->Contains(ios->owner)) {
+        UC_DEBUG("LustreTransQueue::Worker - Task {} already failed, skipping", ios->owner);
+        if (ios->waiter) { ios->waiter->Done(); }
+        return;
+    }
+
+    // 根据任务类型执行相应的 I/O 操作
+    if (ios->type == TransTask::Type::DUMP) {
+        H2S(ios);
+    } else {
+        S2H(ios);
+    }
+}
+
+// ============================================================================
 // Push 方法实现
 // ============================================================================
 
@@ -162,18 +194,13 @@ void TransQueue::Push(TaskPtr task, WaiterPtr waiter)
     // 设置 Latch 计数 (需要等待的 IoUnit 数量)
     waiter->Set(units.size());
 
-    // 执行每个 IoUnit
+    // 将所有 IoUnit 推入线程池执行
     for (auto& unit : units) {
         unit->waiter = waiter;
-        // TODO: 实际推入线程池执行
-        // pool_.Push(std::move(unit));
-        // 暂时直接执行 (P1-1 阶段)
-        if (task->type == TransTask::Type::DUMP) {
-            H2S(unit);
-        } else {
-            S2H(unit);
-        }
+        pool_.Push(std::move(unit));
     }
+
+    UC_DEBUG("LustreTransQueue::Push - {} units pushed to thread pool", units.size());
 }
 
 // ============================================================================
