@@ -67,28 +67,35 @@ Status LustreFile::CreateStriped(int stripeCount, size_t stripeSize, mode_t mode
     }
 
 #ifdef HAVE_LUSTRE_API
-    // 使用 Lustre API 创建条带化文件
-    struct llapi_layout* layout = llapi_layout_alloc();
-    if (!layout) {
-        UC_ERROR("Failed to allocate Lustre layout for {}", path_);
-        return Status::OsApiError("Failed to allocate Lustre layout");
+    // 使用 llapi_file_create() API 创建条带化文件
+    // 这个函数专门用于创建条带化文件
+
+    int result = llapi_file_create(path_.c_str(),
+                                    stripeSize,
+                                    -1,      // stripe_offset: 自动选择
+                                    stripeCount,
+                                    0);      // stripe_pattern: RAID0
+
+    if (result != 0) {
+        int saved_errno = errno;
+        UC_WARN("llapi_file_create() failed for {} (rc={}, errno={}: {})",
+                path_, result, saved_errno, strerror(-result));
+
+        // 删除可能已创建的文件
+        if (Exists(path_)) {
+            Remove(path_);
+        }
+
+        // 回退到普通文件创建
+        return CreateNormal(O_CREAT | O_WRONLY | O_EXCL, mode);
     }
 
-    // 设置条带参数
-    if (stripeCount > 0) {
-        llapi_layout_stripe_count_set(layout, stripeCount);
-    }
-    if (stripeSize > 0) {
-        llapi_layout_stripe_size_set(layout, stripeSize);
-    }
-
-    // 创建文件 (layout 参数在最后)
-    int rc = llapi_layout_file_create(path_.c_str(), O_CREAT | O_WRONLY | O_EXCL, mode, layout);
-    llapi_layout_free(layout);
-
-    if (rc != 0) {
-        UC_ERROR("Failed to create striped file {}: {}", path_, strerror(errno));
-        return Status::OsApiError(std::string("llapi_layout_create failed: ") + strerror(errno));
+    // llapi_file_create() 创建并关闭文件，现在需要重新打开
+    fd_ = open(path_.c_str(), O_WRONLY);
+    if (fd_ < 0) {
+        int error = errno;
+        UC_ERROR("Failed to open striped file {} after creation: {}", path_, strerror(error));
+        return Status::OsApiError(std::string("open failed: ") + strerror(error));
     }
 
     UC_INFO("Created striped file {} (stripe_count={}, stripe_size={})",
@@ -258,12 +265,8 @@ Status LustreFile::SetStripedDirectory(const std::string& path,
     // stripeCount 为 0 时不启用条带化
     if (stripeCount <= 0) {
         UC_DEBUG("Stripe count is {}, skipping striping setup for {}", stripeCount, path);
-        return Status::OK();
+        return MkDir(path, mode);
     }
-
-    // 简化方案：在父目录（backend）设置条带属性
-    // data 子目录会自动继承父目录的条带属性
-    // 例如：/mnt/lustre47/demo 设置条带化，/mnt/lustre47/demo/data 自动继承
 
     // 从路径中提取父目录（去掉 /data 后缀）
     std::string parentPath = path;
@@ -273,53 +276,59 @@ Status LustreFile::SetStripedDirectory(const std::string& path,
         parentPath = parentPath.substr(0, parentPath.length() - dataSuffix.length());
     }
 
-    // 步骤 1: 创建父目录
+    // 确保父目录存在
     auto s = MkDir(parentPath, mode);
     if (s.Failure()) {
         UC_ERROR("Failed to create parent directory {}: {}", parentPath, s.ToString());
         return s;
     }
 
-    // 步骤 2: 使用 lfs setstripe 设置条带属性
-    // 构造命令: lfs setstripe <parentPath> -c <stripeCount> -S <stripeSize>
-    std::string cmd = "lfs setstripe " + parentPath + " -c " + std::to_string(stripeCount) +
-                      " -S " + std::to_string(stripeSize) + " 2>&1";
-
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (pipe) {
-        char buffer[256];
-        std::string output;
-        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-            output += buffer;
-        }
-        int status = pclose(pipe);
-
-        if (status != 0) {
-            // 检查是否是因为条带属性已存在
-            if (output.find("stripe already set") != std::string::npos ||
-                output.find("existing stripe") != std::string::npos) {
-                UC_INFO("Parent directory {} already has stripe attributes", parentPath);
-            } else {
-                UC_WARN("lfs setstripe command failed for {}: {}", parentPath, output);
-            }
-        } else {
-            UC_INFO("Set stripe attributes on parent directory {} (stripe_count={}, stripe_size={})",
-                    parentPath, stripeCount, stripeSize);
-        }
+    // 使用 llapi_layout API 设置目录的默认文件条带属性
+    struct llapi_layout* layout = llapi_layout_alloc();
+    if (!layout) {
+        UC_ERROR("Failed to allocate layout for {}", parentPath);
+        return Status::Error("Failed to allocate layout");
     }
 
-    // 步骤 3: 创建 data 子目录（自动继承条带属性）
+    // 设置条带参数
+    if (stripeCount > 0) {
+        llapi_layout_stripe_count_set(layout, stripeCount);
+    }
+    if (stripeSize > 0) {
+        llapi_layout_stripe_size_set(layout, stripeSize);
+    }
+
+    // 使用 O_DIRECTORY | O_RDONLY 打开目录并设置默认条带
+    int fd = llapi_layout_file_open(parentPath.c_str(),
+                                     O_DIRECTORY | O_RDONLY,
+                                     0,
+                                     layout);
+
+    int saved_errno = errno;
+    llapi_layout_free(layout);
+
+    if (fd < 0) {
+        UC_WARN("Failed to set default stripe on {} (fd={}, errno={}: {})",
+                parentPath, fd, saved_errno, strerror(saved_errno));
+        // 不返回错误，继续创建 data 目录
+    } else {
+        UC_INFO("Set default stripe on parent directory {} (stripe_count={}, stripe_size={})",
+                parentPath, stripeCount, stripeSize);
+        close(fd);
+    }
+
+    // 创建 data 子目录（将继承父目录的默认条带属性）
     s = MkDir(path, mode);
     if (s.Failure()) {
         UC_WARN("Failed to create data directory {}: {}", path, s.ToString());
-        // 不返回错误，因为父目录已设置条带属性
+        return s;
     }
 
     return Status::OK();
 #else
-    // 非 Lustre 环境，返回 OK（no-op）
-    UC_DEBUG("Lustre API not available, skipping striping setup for {}", path);
-    return Status::OK();
+    // 非 Lustre 环境，直接创建目录
+    UC_DEBUG("Lustre API not available, creating normal directory: {}", path);
+    return MkDir(path, mode);
 #endif
 }
 
