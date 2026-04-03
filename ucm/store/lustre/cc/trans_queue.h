@@ -103,6 +103,10 @@ private:
     size_t nShardPerBlock_;
     bool ioDirect_;
 
+    // P3: 条带化配置
+    size_t stripeCount_{0};
+    size_t stripeSize_{0};
+
     // P2: 异步 I/O 支持
     std::unique_ptr<AsyncIOAdapter> asyncIo_;
     bool enableAsyncIo_{false};

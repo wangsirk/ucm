@@ -37,6 +37,7 @@ Status TransQueue::Setup(const Config& config, TaskIdSet* failureSet, const Spac
     UC_INFO("LustreTransQueue::Setup - IO size: {}, shard size: {}", config.tensorSize, config.shardSize);
     UC_INFO("LustreTransQueue::Setup - IO direct: {}, concurrency: {}", config.ioDirect, config.dataTransConcurrency);
     UC_INFO("LustreTransQueue::Setup - Async I/O: {}, backend: {}", config.enableAsyncIo, config.asyncIoBackend);
+    UC_INFO("LustreTransQueue::Setup - Stripe count: {}, stripe size: {}", config.stripeCount, config.stripeSize);
 
     failureSet_ = failureSet;
     layout_ = layout;
@@ -44,6 +45,10 @@ Status TransQueue::Setup(const Config& config, TaskIdSet* failureSet, const Spac
     shardSize_ = config.shardSize;
     nShardPerBlock_ = config.blockSize / config.shardSize;
     ioDirect_ = config.ioDirect;
+
+    // P3: 条带化配置
+    stripeCount_ = config.stripeCount;
+    stripeSize_ = config.stripeSize;
 
     // P2: 初始化异步 I/O 后端
     enableAsyncIo_ = config.enableAsyncIo;
@@ -215,8 +220,18 @@ Status TransQueue::H2S(const std::shared_ptr<ExtendedIoUnit>& ios)
             }
         }
 
-        // 创建新文件
-        Status status = file->CreateNormal(O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        // P3: 根据条带配置选择文件创建方式
+        Status status = Status::OK();
+        if (stripeCount_ > 0) {
+            // 使用条带化文件创建
+            UC_DEBUG("LustreTransQueue::H2S - Creating striped file (count={}, size={})",
+                     stripeCount_, stripeSize_);
+            status = file->CreateStriped(static_cast<int>(stripeCount_), stripeSize_, 0644);
+        } else {
+            // 使用普通文件创建
+            status = file->CreateNormal(O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        }
+
         if (status.Failure()) {
             UC_ERROR("LustreTransQueue::H2S - Failed to create temp file: {}", status.ToString());
             if (ios->waiter) { ios->waiter->Done(); }

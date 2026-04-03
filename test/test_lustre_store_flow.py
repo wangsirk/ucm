@@ -51,8 +51,8 @@ def test_lustre_store_creation():
         "block_size": 512,
         "tensor_size": 512,
         "shard_size": 512,
-        "stripe_count": 0,  # 不启用条带化
-        "stripe_size": 0,
+        "stripe_count": 2,  # 启用条带化，2个OST
+        "stripe_size": 1048576,  # 1MB 条带大小
     }
     
     try:

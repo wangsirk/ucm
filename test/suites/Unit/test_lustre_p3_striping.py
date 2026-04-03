@@ -87,7 +87,7 @@ def get_stripe_info(file_path):
             timeout=5
         )
         if result.returncode == 0:
-            # 解析输出: "stripe_count: 4"
+            # 解析输出: "stripe_count: 2"
             for line in result.stdout.splitlines():
                 if "stripe_count" in line:
                     parts = line.split(":")
@@ -109,10 +109,10 @@ def stripe_config():
         "store_pipeline": "Lustre",
         "storage_backends": [backend],
         "device_id": -1,
-        "tensor_size": 100,
-        "shard_size": 100,
-        "block_size": 100,
-        "stripe_count": 4,          # 启用条带化
+        "tensor_size": 1024,        # 与测试数据大小匹配
+        "shard_size": 1024,         # 与测试数据大小匹配
+        "block_size": 1024,         # 与测试数据大小匹配
+        "stripe_count": 2,          # 启用条带化 (OST 数量为 2)
         "stripe_size": 1048576,     # 1MB
         "_test_backend": backend,
     }
@@ -127,9 +127,9 @@ def no_stripe_config():
         "store_pipeline": "Lustre",
         "storage_backends": [backend],
         "device_id": -1,
-        "tensor_size": 100,
-        "shard_size": 100,
-        "block_size": 100,
+        "tensor_size": 1024,        # 与测试数据大小匹配
+        "shard_size": 1024,         # 与测试数据大小匹配
+        "block_size": 1024,         # 与测试数据大小匹配
         "stripe_count": 0,          # 不启用条带化
         "stripe_size": 0,
         "_test_backend": backend,
@@ -230,7 +230,7 @@ class TestStripeInheritance:
 
         验证点：
         - Dump 操作创建文件成功
-        - 文件条带数与配置一致 (stripe_count=4)
+        - 文件条带数与配置一致 (stripe_count=2)
         """
         # 创建测试数据
         test_data = create_test_tensor(1024, 0xAB)
@@ -372,7 +372,7 @@ class TestMultipleBackendsStriping:
             "tensor_size": 100,
             "shard_size": 100,
             "block_size": 100,
-            "stripe_count": 4,
+            "stripe_count": 2,
             "stripe_size": 1048576,
             "_test_backend": backend1,
         }
