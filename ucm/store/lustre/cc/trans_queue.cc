@@ -304,9 +304,14 @@ Status TransQueue::H2SAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
                              const std::shared_ptr<LustreFile>& file)
 {
     // 提交异步写请求
-    // 修复 P0: 使用 weak_ptr 避免循环引用
+    // 修复 C1/C3: 捕获必要的值和 shared_ptr 确保生命周期安全
     int fd = file->GetFd();
     std::weak_ptr<ExtendedIoUnit> weakIos = ios->WeakPtr();
+
+    // 捕获必要的数据值，避免访问可能被销毁的对象成员
+    Detail::BlockId blockId = ios->blockId;
+    size_t currentShard = ios->currentShard;
+    size_t totalShards = ios->totalShards;
 
     IoRequest req(
         fd,
@@ -314,7 +319,7 @@ Status TransQueue::H2SAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
         ios->ioSize,
         static_cast<off64_t>(ios->fileOffset),
         true,  // isWrite
-        [this, weakIos, tmpPath](IoRequest::Result result, ssize_t bytesTransferred) {
+        [this, weakIos, tmpPath, blockId, currentShard, totalShards, file](IoRequest::Result result, ssize_t bytesTransferred) {
             // 尝试获取 shared_ptr，如果对象已被销毁则跳过
             auto ios = weakIos.lock();
             if (!ios) {
@@ -331,8 +336,8 @@ Status TransQueue::H2SAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
             }
 
             // 写入成功，如果是最后一个 Shard，提交文件
-            if (ios->IsLastShard()) {
-                Status commitStatus = CommitFile(ios->blockId);
+            if (currentShard == totalShards - 1) {
+                Status commitStatus = CommitFile(blockId);
                 // 幂等操作：DuplicateKey 表示其他 shard 已提交，应视为成功
                 if (!commitStatus.IsSuccessOrDuplicate()) {
                     UC_ERROR("LustreTransQueue::H2SAsync - Commit failed: {}", commitStatus.ToString());
@@ -346,7 +351,7 @@ Status TransQueue::H2SAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
             }
 
             UC_DEBUG("LustreTransQueue::H2SAsync - Shard {}/{} async write completed",
-                     ios->currentShard, ios->totalShards);
+                     currentShard, totalShards);
 
             ios->MarkCompleted(Status::OK());
             if (ios->waiter) { ios->waiter->Done(); }
@@ -474,9 +479,13 @@ Status TransQueue::S2HAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
                              const std::shared_ptr<LustreFile>& file)
 {
     // 提交异步读请求
-    // 修复 P0: 使用 weak_ptr 避免循环引用
+    // 修复 C1/C3: 捕获必要的值和 shared_ptr 确保生命周期安全
     int fd = file->GetFd();
     std::weak_ptr<ExtendedIoUnit> weakIos = ios->WeakPtr();
+
+    // 捕获必要的数据值，避免访问可能被销毁的对象成员
+    Detail::TaskHandle owner = ios->owner;  // TaskHandle (任务 ID)
+    size_t shardIndex = ios->shardIndex;
 
     IoRequest req(
         fd,
@@ -484,7 +493,7 @@ Status TransQueue::S2HAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
         ios->ioSize,
         static_cast<off64_t>(ios->fileOffset),
         false,  // isWrite = false (读)
-        [this, weakIos](IoRequest::Result result, ssize_t bytesTransferred) {
+        [this, weakIos, owner, shardIndex, file](IoRequest::Result result, ssize_t bytesTransferred) {
             // 尝试获取 shared_ptr，如果对象已被销毁则跳过
             auto ios = weakIos.lock();
             if (!ios) {
@@ -496,12 +505,12 @@ Status TransQueue::S2HAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
             if (result == IoRequest::Result::FAILURE) {
                 UC_ERROR("LustreTransQueue::S2HAsync - Async read failed");
                 ios->MarkCompleted(Status::OsApiError("Async read failed"));
-                failureSet_->Insert(ios->owner);
+                failureSet_->Insert(owner);
                 if (ios->waiter) { ios->waiter->Done(); }
                 return;
             }
 
-            UC_DEBUG("LustreTransQueue::S2HAsync - Shard {} async read completed", ios->shardIndex);
+            UC_DEBUG("LustreTransQueue::S2HAsync - Shard {} async read completed", shardIndex);
 
             ios->MarkCompleted(Status::OK());
             if (ios->waiter) { ios->waiter->Done(); }

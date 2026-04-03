@@ -268,25 +268,38 @@ Status LustreFile::SetStripedDirectory(const std::string& path,
         return MkDir(path, mode);
     }
 
-    // 从路径中提取父目录（去掉 /data 后缀）
-    std::string parentPath = path;
+    // 路径格式说明: 函数期望 path 格式为 "{parent}/data"
+    // 条带属性将设置在父目录上，data 子目录继承该属性
+    // 如果路径不符合此格式，则直接在给定路径上设置条带属性
+
+    std::string targetPath;  // 设置条带属性的目标目录
+    std::string dataPath;    // 最终创建的 data 目录路径
+
     const std::string dataSuffix = "/data";
-    if (parentPath.length() > dataSuffix.length() &&
-        parentPath.substr(parentPath.length() - dataSuffix.length()) == dataSuffix) {
-        parentPath = parentPath.substr(0, parentPath.length() - dataSuffix.length());
+    if (path.length() > dataSuffix.length() &&
+        path.substr(path.length() - dataSuffix.length()) == dataSuffix) {
+        // 路径以 "/data" 结尾，提取父目录
+        targetPath = path.substr(0, path.length() - dataSuffix.length());
+        dataPath = path;
+        UC_DEBUG("Path format is parent/data, will set stripe on parent: {}", targetPath);
+    } else {
+        // 路径不符合预期格式，直接在当前路径设置条带属性
+        targetPath = path;
+        dataPath = path;
+        UC_DEBUG("Path format doesn't match parent/data, will set stripe directly on: {}", targetPath);
     }
 
-    // 确保父目录存在
-    auto s = MkDir(parentPath, mode);
+    // 确保目标目录存在
+    auto s = MkDir(targetPath, mode);
     if (s.Failure()) {
-        UC_ERROR("Failed to create parent directory {}: {}", parentPath, s.ToString());
+        UC_ERROR("Failed to create target directory {}: {}", targetPath, s.ToString());
         return s;
     }
 
     // 使用 llapi_layout API 设置目录的默认文件条带属性
     struct llapi_layout* layout = llapi_layout_alloc();
     if (!layout) {
-        UC_ERROR("Failed to allocate layout for {}", parentPath);
+        UC_ERROR("Failed to allocate layout for {}", targetPath);
         return Status::Error("Failed to allocate layout");
     }
 
@@ -299,7 +312,7 @@ Status LustreFile::SetStripedDirectory(const std::string& path,
     }
 
     // 使用 O_DIRECTORY | O_RDONLY 打开目录并设置默认条带
-    int fd = llapi_layout_file_open(parentPath.c_str(),
+    int fd = llapi_layout_file_open(targetPath.c_str(),
                                      O_DIRECTORY | O_RDONLY,
                                      0,
                                      layout);
@@ -309,19 +322,21 @@ Status LustreFile::SetStripedDirectory(const std::string& path,
 
     if (fd < 0) {
         UC_WARN("Failed to set default stripe on {} (fd={}, errno={}: {})",
-                parentPath, fd, saved_errno, strerror(saved_errno));
-        // 不返回错误，继续创建 data 目录
+                targetPath, fd, saved_errno, strerror(saved_errno));
+        // 继续创建 data 目录（不带回条带属性）
     } else {
-        UC_INFO("Set default stripe on parent directory {} (stripe_count={}, stripe_size={})",
-                parentPath, stripeCount, stripeSize);
+        UC_INFO("Set default stripe on target directory {} (stripe_count={}, stripe_size={})",
+                targetPath, stripeCount, stripeSize);
         close(fd);
     }
 
-    // 创建 data 子目录（将继承父目录的默认条带属性）
-    s = MkDir(path, mode);
-    if (s.Failure()) {
-        UC_WARN("Failed to create data directory {}: {}", path, s.ToString());
-        return s;
+    // 如果 data 路径与目标路径不同，创建 data 子目录
+    if (dataPath != targetPath) {
+        s = MkDir(dataPath, mode);
+        if (s.Failure()) {
+            UC_WARN("Failed to create data directory {}: {}", dataPath, s.ToString());
+            return s;
+        }
     }
 
     return Status::OK();

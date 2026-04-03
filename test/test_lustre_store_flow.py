@@ -64,7 +64,7 @@ def test_lustre_store_creation():
         return None
 
 
-def test_lustre_store_flow(store):
+def run_lustre_store_flow_test(store):
     """测试 Lustre Store 的完整流程：lookup -> load -> dump"""
     print("\n" + "=" * 60)
     print("步骤3: 测试 Lustre Store 流程 (lookup/load/dump)")
@@ -156,7 +156,7 @@ def main():
     
     # 测试3: 流程测试
     if store:
-        results.append(("流程测试", test_lustre_store_flow(store)))
+        results.append(("流程测试", run_lustre_store_flow_test(store)))
 
     # 汇总结果
     print("\n" + "=" * 60)
