@@ -106,11 +106,11 @@ def lustre_store(lustre_config):
     """Lustre Store 实例"""
     store = UcmPipelineStore(lustre_config)
     yield store
-    # 🔧 保留测试数据用于调试 - 禁用清理
-    # import shutil
-    # data_dir = lustre_config["storage_backends"][0] + "/data"
-    # if os.path.exists(data_dir):
-    #     shutil.rmtree(data_dir, ignore_errors=True)
+    # 清理测试数据
+    import shutil
+    data_dir = lustre_config["storage_backends"][0] + "/data"
+    if os.path.exists(data_dir):
+        shutil.rmtree(data_dir, ignore_errors=True)
 
 
 # ===== P1-L7: Lookup 功能测试 =====
@@ -133,18 +133,18 @@ class TestLustreP1Lookup:
         task = lustre_store.dump([block_id], [0], [[data]])
         lustre_store.wait(task)
 
-        # Lookup 应该返回 [1]
+        # Lookup 应该返回 [True]
         result = lustre_store.lookup([block_id])
-        assert result == [1], f"Expected [1], got {result}"
+        assert result == [True], f"Expected [True], got {result}"
         log_test_pass("P1-L1-T1 查询存在的Block")
 
     def test_lookup_single_block_not_exists(self, lustre_store):
         """[P1-L1-T2] 查询不存在的 Block"""
         block_id = generate_block_id(2000)
 
-        # Lookup 应该返回 [0]
+        # Lookup 应该返回 [False]
         result = lustre_store.lookup([block_id])
-        assert result == [0], f"Expected [0], got {result}"
+        assert result == [False], f"Expected [False], got {result}"
         log_test_pass("P1-L1-T2 查询不存在的Block")
 
     def test_lookup_multiple_blocks(self, lustre_store):
@@ -159,7 +159,7 @@ class TestLustreP1Lookup:
         # 查询：3 个存在 + 1 个不存在
         test_ids = block_ids + [generate_block_id(9999)]
         result = lustre_store.lookup(test_ids)
-        assert result.tolist() == [1, 1, 1, 0], f"Expected [1,1,1,0], got {result.tolist()}"
+        assert result.tolist() == [True, True, True, False], f"Expected [True,True,True,False], got {result.tolist()}"
         log_test_pass("P1-L1-T3 批量查询混合状态")
 
     def test_lookup_empty_list(self, lustre_store):
@@ -227,7 +227,7 @@ class TestLustreP1LookupIntegration:
 
         # 2. Lookup 检查存在
         result = lustre_store.lookup([block_id])
-        assert result == [1], "Block should exist after Dump"
+        assert result == [True], "Block should exist after Dump"
 
         # 3. Load 数据
         loaded = torch.zeros(1024, dtype=torch.uint8)
@@ -249,7 +249,7 @@ class TestLustreP1LookupIntegration:
 
         # 2. Lookup 确认存在
         result = lustre_store.lookup([block_id])
-        assert result == [1], "Block should exist"
+        assert result == [True], "Block should exist"
 
         # 3. Load 并验证
         loaded = torch.zeros(1024, dtype=torch.uint8)
@@ -264,7 +264,7 @@ class TestLustreP1LookupIntegration:
 
         # 1. Lookup 确认不存在
         result = lustre_store.lookup([block_id])
-        assert result == [0], "Block should not exist"
+        assert result == [False], "Block should not exist"
 
         # 2. 尝试 Load（应该失败）
         loaded = torch.zeros(1024, dtype=torch.uint8)
