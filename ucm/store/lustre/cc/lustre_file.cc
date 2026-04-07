@@ -95,6 +95,10 @@ Status LustreFile::CreateStriped(int stripeCount, size_t stripeSize, mode_t mode
     if (fd_ < 0) {
         int error = errno;
         UC_ERROR("Failed to open striped file {} after creation: {}", path_, strerror(error));
+        // 修复 P1: 清理 llapi_file_create 已创建的文件，避免泄漏
+        if (Exists(path_)) {
+            Remove(path_);
+        }
         return Status::OsApiError(std::string("open failed: ") + strerror(error));
     }
 
@@ -117,6 +121,11 @@ Status LustreFile::CreateNormal(uint32_t flags, mode_t mode)
     fd_ = open(path_.c_str(), flags, mode);
     if (fd_ < 0) {
         int error = errno;
+        // 修复 P1: EEXIST 表示文件已存在，返回 DuplicateKey 以支持幂等性
+        if (error == EEXIST) {
+            UC_DEBUG("File already exists: {}", path_);
+            return Status::DuplicateKey();
+        }
         UC_ERROR("Failed to create file {}: {}", path_, strerror(error));
         return Status::OsApiError(std::string("open failed: ") + strerror(error));
     }

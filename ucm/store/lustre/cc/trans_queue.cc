@@ -272,8 +272,13 @@ Status TransQueue::H2S(const std::shared_ptr<ExtendedIoUnit>& ios)
                      stripeCount_, stripeSize_);
             status = file->CreateStriped(static_cast<int>(stripeCount_), stripeSize_, 0644);
         } else {
-            // 使用普通文件创建
-            status = file->CreateNormal(O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            // 修复 P1: 使用 O_EXCL 确保原子性创建，避免 O_TRUNC 导致数据损坏
+            // 如果文件已存在（被其他 shard 创建），Open 会失败，回退到追加模式
+            status = file->CreateNormal(O_WRONLY | O_CREAT | O_EXCL, 0644);
+            if (status.Underlying() == Status::DuplicateKey().Underlying()) {
+                UC_DEBUG("LustreTransQueue::H2S - File exists, opening for append");
+                status = file->Open(O_WRONLY | O_APPEND);
+            }
         }
 
         if (status.Failure()) {
@@ -325,11 +330,22 @@ Status TransQueue::H2SSync(const std::shared_ptr<ExtendedIoUnit>& ios, const std
             return syncStatus;
         }
 
-        Status commitStatus = CommitFile(ios->blockId);
-        if (commitStatus.Failure()) {
-            UC_ERROR("LustreTransQueue::H2SSync - Commit failed: {}", commitStatus.ToString());
-            if (ios->waiter) { ios->waiter->Done(); }
-            return commitStatus;
+        // 修复 P1: 先检查最终文件是否已存在（可能被其他 shard 提前提交）
+        std::string finalPath = layout_->DataFilePath(ios->blockId, false);
+        if (LustreFile::Exists(finalPath)) {
+            UC_DEBUG("LustreTransQueue::H2SSync - Final file already exists, skipping commit");
+            LustreFile::Remove(tmpPath);
+        } else {
+            Status commitStatus = CommitFile(ios->blockId);
+            // 幂等操作：DuplicateKey 表示其他 shard 已提交，应视为成功
+            if (!commitStatus.IsSuccessOrDuplicate()) {
+                UC_ERROR("LustreTransQueue::H2SSync - Commit failed: {}", commitStatus.ToString());
+                if (ios->waiter) { ios->waiter->Done(); }
+                return commitStatus;
+            }
+            if (commitStatus.IsDuplicate()) {
+                UC_INFO("LustreTransQueue::H2SSync - Commit: file already exists (concurrent commit)");
+            }
         }
     }
 
@@ -379,18 +395,28 @@ Status TransQueue::H2SAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
                 return;
             }
 
-            // 写入成功，如果是最后一个 Shard，提交文件
+            // 写入成功，如果是最后一个 Shard（按索引），提交文件
+            // 修复 P1: 检查最终文件是否已存在，如果已存在则跳过提交
+            // 解决多 shard 并发写入时，完成顺序不确定导致的竞态问题
             if (currentShard == totalShards - 1) {
-                Status commitStatus = CommitFile(blockId);
-                // 幂等操作：DuplicateKey 表示其他 shard 已提交，应视为成功
-                if (!commitStatus.IsSuccessOrDuplicate()) {
-                    UC_ERROR("LustreTransQueue::H2SAsync - Commit failed: {}", commitStatus.ToString());
-                    ios->MarkCompleted(commitStatus);
-                    if (ios->waiter) { ios->waiter->Done(); }
-                    return;
-                }
-                if (commitStatus.IsDuplicate()) {
-                    UC_INFO("LustreTransQueue::H2SAsync - Commit: file already exists (concurrent commit)");
+                // 先检查最终文件是否已存在（可能被其他 shard 提前提交）
+                std::string finalPath = layout_->DataFilePath(blockId, false);
+                if (LustreFile::Exists(finalPath)) {
+                    UC_DEBUG("LustreTransQueue::H2SAsync - Final file already exists, skipping commit");
+                    // 文件已存在，删除临时文件即可
+                    LustreFile::Remove(tmpPath);
+                } else {
+                    Status commitStatus = CommitFile(blockId);
+                    // 幂等操作：DuplicateKey 表示其他 shard 已提交，应视为成功
+                    if (!commitStatus.IsSuccessOrDuplicate()) {
+                        UC_ERROR("LustreTransQueue::H2SAsync - Commit failed: {}", commitStatus.ToString());
+                        ios->MarkCompleted(commitStatus);
+                        if (ios->waiter) { ios->waiter->Done(); }
+                        return;
+                    }
+                    if (commitStatus.IsDuplicate()) {
+                        UC_INFO("LustreTransQueue::H2SAsync - Commit: file already exists (concurrent commit)");
+                    }
                 }
             }
 

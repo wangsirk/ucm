@@ -89,8 +89,9 @@ private:
             return Status::InvalidParam("invalid concurrency({},{})", 
                                         cfg.dataTransConcurrency, cfg.lookupConcurrency);
         }
-        if (cfg.dataDirShardBytes > 5) {
-            return Status::InvalidParam("invalid shard bytes({})", cfg.dataDirShardBytes);
+        if (cfg.dataDirShardBytes > LUSTRE_MAX_DATA_DIR_SHARD_BYTES) {
+            return Status::InvalidParam("invalid shard bytes({}, max={})",
+                                        cfg.dataDirShardBytes, LUSTRE_MAX_DATA_DIR_SHARD_BYTES);
         }
         if (cfg.deviceId == -1) { return Status::OK(); }
 

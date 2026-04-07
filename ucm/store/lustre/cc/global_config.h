@@ -47,6 +47,7 @@
 #define LUSTRE_DEFAULT_STRIPE_COUNT 0       // 0表示使用文件系统默认值
 #define LUSTRE_DEFAULT_STRIPE_SIZE 1048576  // 1MB默认条带大小
 #define LUSTRE_MAX_PATH_LENGTH 4096         // 最大路径长度
+#define LUSTRE_MAX_DATA_DIR_SHARD_BYTES 5   // 数据目录分片最大字节数 (最多支持 16^5 = 1048576 个分片目录)
 
 // I/O配置
 #define LUSTRE_DEFAULT_IO_DIRECT false      // 默认不使用直接I/O

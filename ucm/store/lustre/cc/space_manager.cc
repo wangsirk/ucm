@@ -23,6 +23,9 @@
  */
 #include "space_manager.h"
 #include "logger/logger.h"
+#include <thread>
+#include <future>
+#include <algorithm>
 
 namespace UC::LustreStore {
 
@@ -43,9 +46,46 @@ std::vector<uint8_t> SpaceManager::Lookup(const Detail::BlockId* blocks, size_t 
 {
     UC_INFO("LustreSpaceManager::Lookup - Looking up {} blocks", num);
     std::vector<uint8_t> result(num, 0);
-    for (size_t i = 0; i < num; i++) {
-        result[i] = LookupSingle(&blocks[i]);
+
+    // P1 修复: 使用多线程并行查询，避免 N+1 syscall 问题
+    // 小数量直接顺序查询，避免线程开销
+    if (num <= 4) {
+        for (size_t i = 0; i < num; i++) {
+            result[i] = LookupSingle(&blocks[i]);
+        }
+    } else {
+        // 使用线程池并行查询
+        // 确定线程数量：使用硬件并发数，但限制最大线程数
+        size_t hwConcurrency = std::thread::hardware_concurrency();
+        if (hwConcurrency == 0) {
+            hwConcurrency = 4;  // 防止 hardware_concurrency 返回 0
+        }
+        size_t numThreads = std::min(num, hwConcurrency);
+        size_t blocksPerThread = (num + numThreads - 1) / numThreads;
+
+        std::vector<std::future<void>> futures;
+        futures.reserve(numThreads);
+
+        for (size_t t = 0; t < numThreads; ++t) {
+            size_t start = t * blocksPerThread;
+            size_t end = std::min(start + blocksPerThread, num);
+            if (start >= num) {
+                break;
+            }
+
+            futures.push_back(std::async(std::launch::async, [this, &blocks, &result, start, end]() {
+                for (size_t i = start; i < end; ++i) {
+                    result[i] = LookupSingle(&blocks[i]);
+                }
+            }));
+        }
+
+        // 等待所有线程完成
+        for (auto& f : futures) {
+            f.get();
+        }
     }
+
     size_t foundCount = std::count(result.begin(), result.end(), 1);
     UC_INFO("LustreSpaceManager::Lookup - {} blocks, {} found", num, foundCount);
     return result;
