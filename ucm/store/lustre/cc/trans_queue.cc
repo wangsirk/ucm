@@ -135,30 +135,25 @@ TransQueue::SplitTask(const TransTask& task)
         size_t fileOffset = currentShard * shardSize_;
 
         // 确定源地址和目标地址
-        void* srcAddr = nullptr;
-        void* dstAddr = nullptr;
+        // 修复: 保存完整的 addrs 数组 (与 PosixStore 保持一致)
+        std::vector<void*> srcAddrs;
+        std::vector<void*> dstAddrs;
 
         if (task.type == TransTask::Type::DUMP) {
             // Dump: Device -> Storage
             // shard.addrs 包含设备侧地址
-            if (!shard.addrs.empty()) {
-                srcAddr = shard.addrs[0];  // 使用第一个地址
-            }
-            // dstAddr 留空，由文件系统处理
+            srcAddrs = shard.addrs;  // 保存所有地址
         } else {
             // Load: Storage -> Device
-            // srcAddr 留空，由文件系统处理
-            if (!shard.addrs.empty()) {
-                dstAddr = shard.addrs[0];  // 使用第一个地址
-            }
+            dstAddrs = shard.addrs;  // 保存所有地址
         }
 
         // 创建 IoUnit (使用 shared_ptr 以支持异步回调的生命周期管理)
         auto ioUnit = std::make_shared<ExtendedIoUnit>(
             shard.owner,           // BlockId
             shard.index,          // ShardIndex
-            srcAddr,              // 源地址
-            dstAddr,              // 目标地址
+            srcAddrs,             // 源地址数组 (修复: 保存所有地址)
+            dstAddrs,             // 目标地址数组 (修复: 保存所有地址)
             fileOffset,           // 文件偏移
             ioSize_,              // I/O 大小
             task.id,              // TaskHandle
@@ -244,10 +239,12 @@ Status TransQueue::H2S(const std::shared_ptr<ExtendedIoUnit>& ios)
     // 2. 打开或创建临时文件 - 使用 shared_ptr 管理生命周期
     auto file = std::make_shared<LustreFile>(tmpPath);
 
-    // 检查文件是否已存在 (追加模式)
+    // 检查文件是否已存在
     if (LustreFile::Exists(tmpPath)) {
-        UC_DEBUG("LustreTransQueue::H2S - Temp file exists, opening for append");
-        Status status = file->Open(O_WRONLY | O_APPEND);
+        // 与 PosixStore 保持一致：使用 O_WRONLY，让 pwrite64 的 offset 参数控制写入位置
+        // 不使用 O_APPEND，因为 O_APPEND + pwrite64 offset 的行为是实现相关的
+        UC_DEBUG("LustreTransQueue::H2S - Temp file exists, opening for write");
+        Status status = file->Open(O_WRONLY);
         if (status.Failure()) {
             UC_ERROR("LustreTransQueue::H2S - Failed to open temp file: {}", status.ToString());
             if (ios->waiter) { ios->waiter->Done(); }
@@ -272,12 +269,12 @@ Status TransQueue::H2S(const std::shared_ptr<ExtendedIoUnit>& ios)
                      stripeCount_, stripeSize_);
             status = file->CreateStriped(static_cast<int>(stripeCount_), stripeSize_, 0644);
         } else {
-            // 修复 P1: 使用 O_EXCL 确保原子性创建，避免 O_TRUNC 导致数据损坏
-            // 如果文件已存在（被其他 shard 创建），Open 会失败，回退到追加模式
-            status = file->CreateNormal(O_WRONLY | O_CREAT | O_EXCL, 0644);
+            // 与 PosixStore 保持一致：使用 O_CREAT | O_WRONLY
+            // 如果文件已存在，直接打开并使用 pwrite64 的 offset 参数写入
+            status = file->CreateNormal(O_WRONLY | O_CREAT, 0644);
             if (status.Underlying() == Status::DuplicateKey().Underlying()) {
-                UC_DEBUG("LustreTransQueue::H2S - File exists, opening for append");
-                status = file->Open(O_WRONLY | O_APPEND);
+                UC_DEBUG("LustreTransQueue::H2S - File exists, opening for write");
+                status = file->Open(O_WRONLY);
             }
         }
 
@@ -289,7 +286,8 @@ Status TransQueue::H2S(const std::shared_ptr<ExtendedIoUnit>& ios)
     }
 
     // 3. 写入数据 (同步或异步)
-    if (ios->srcAddr != nullptr && ios->ioSize > 0) {
+    // 修复: 检查 srcAddrs 数组而非单个 srcAddr
+    if (!ios->srcAddrs.empty() && ios->ioSize > 0) {
         if (enableAsyncIo_ && asyncIo_) {
             // P2: 异步 I/O 路径 - 传递 shared_ptr 保持文件打开状态
             return H2SAsync(ios, tmpPath, file);
@@ -298,8 +296,8 @@ Status TransQueue::H2S(const std::shared_ptr<ExtendedIoUnit>& ios)
             return H2SSync(ios, tmpPath, *file);
         }
     } else {
-        UC_WARN("LustreTransQueue::H2S - Skipping write: srcAddr={}, ioSize={}",
-                fmt::ptr(ios->srcAddr), ios->ioSize);
+        UC_WARN("LustreTransQueue::H2S - Skipping write: srcAddrs.size={}, ioSize={}",
+                ios->srcAddrs.size(), ios->ioSize);
         // 标记完成并通知 waiter
         ios->MarkCompleted(Status::OK());
         if (ios->waiter) { ios->waiter->Done(); }
@@ -310,18 +308,28 @@ Status TransQueue::H2S(const std::shared_ptr<ExtendedIoUnit>& ios)
 // P2: 同步 H2S 实现 (保持原有逻辑)
 Status TransQueue::H2SSync(const std::shared_ptr<ExtendedIoUnit>& ios, const std::string& tmpPath, LustreFile& file)
 {
-    // 写入数据 (使用 pwrite 支持并发写入不同偏移)
-    Status status = file.Write(ios->srcAddr, ios->ioSize, ios->fileOffset);
-    if (status.Failure()) {
-        UC_ERROR("LustreTransQueue::H2SSync - Write failed: {}", status.ToString());
-        file.Close();
-        LustreFile::Remove(tmpPath);
-        if (ios->waiter) { ios->waiter->Done(); }
-        return status;
+    // 修复: 遍历所有地址写入数据 (与 PosixStore 保持一致)
+    size_t offset = ios->fileOffset;
+    for (const auto& addr : ios->srcAddrs) {
+        if (addr == nullptr || ios->ioSize == 0) {
+            UC_WARN("LustreTransQueue::H2SSync - Skipping write: addr={}, ioSize={}",
+                    fmt::ptr(addr), ios->ioSize);
+            continue;
+        }
+        
+        Status status = file.Write(addr, ios->ioSize, offset);
+        if (status.Failure()) {
+            UC_ERROR("LustreTransQueue::H2SSync - Write failed at offset {}: {}", offset, status.ToString());
+            file.Close();
+            LustreFile::Remove(tmpPath);
+            if (ios->waiter) { ios->waiter->Done(); }
+            return status;
+        }
+        offset += ios->ioSize;
     }
 
-    // 如果是最后一个 Shard，提交文件
-    if (ios->IsLastShard()) {
+    // 如果是最后一个 Shard，提交文件 (与 PosixStore 保持一致：基于 shardIndex 和 nShardPerBlock_ 判断)
+    if ((ios->shardIndex + 1) == nShardPerBlock_) {
         // 确保数据写入磁盘后再提交
         Status syncStatus = file.Sync();
         if (syncStatus.Failure()) {
@@ -363,6 +371,24 @@ Status TransQueue::H2SAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
                              const std::string& tmpPath,
                              const std::shared_ptr<LustreFile>& file)
 {
+    // 修复: 当有多个地址时，使用同步 I/O 遍历写入
+    // 异步 I/O 当前只支持单个地址，多个地址时回退到同步
+    if (ios->srcAddrs.size() > 1) {
+        UC_DEBUG("LustreTransQueue::H2SAsync - Multiple addresses ({}), using sync I/O", 
+                 ios->srcAddrs.size());
+        return H2SSync(ios, tmpPath, *file);
+    }
+    
+    // 单个地址时，使用异步 I/O
+    if (ios->srcAddrs.empty() || ios->srcAddrs[0] == nullptr) {
+        UC_WARN("LustreTransQueue::H2SAsync - No valid address, skipping");
+        ios->MarkCompleted(Status::OK());
+        if (ios->waiter) { ios->waiter->Done(); }
+        return Status::OK();
+    }
+    
+    void* srcAddr = ios->srcAddrs[0];
+    
     // 提交异步写请求
     // 修复 C1/C3: 捕获必要的值和 shared_ptr 确保生命周期安全
     int fd = file->GetFd();
@@ -370,16 +396,14 @@ Status TransQueue::H2SAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
 
     // 捕获必要的数据值，避免访问可能被销毁的对象成员
     Detail::BlockId blockId = ios->blockId;
-    size_t currentShard = ios->currentShard;
-    size_t totalShards = ios->totalShards;
 
     IoRequest req(
         fd,
-        ios->srcAddr,
+        srcAddr,  // 使用局部变量
         ios->ioSize,
         static_cast<off64_t>(ios->fileOffset),
         true,  // isWrite
-        [this, weakIos, tmpPath, blockId, currentShard, totalShards, file](IoRequest::Result result, ssize_t bytesTransferred) {
+        [this, weakIos, tmpPath, blockId, file, nShardPerBlock = nShardPerBlock_](IoRequest::Result result, ssize_t bytesTransferred) {
             // 尝试获取 shared_ptr，如果对象已被销毁则跳过
             auto ios = weakIos.lock();
             if (!ios) {
@@ -396,9 +420,8 @@ Status TransQueue::H2SAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
             }
 
             // 写入成功，如果是最后一个 Shard（按索引），提交文件
-            // 修复 P1: 检查最终文件是否已存在，如果已存在则跳过提交
-            // 解决多 shard 并发写入时，完成顺序不确定导致的竞态问题
-            if (currentShard == totalShards - 1) {
+            // 与 PosixStore 保持一致：基于 shardIndex 和 nShardPerBlock 判断
+            if ((ios->shardIndex + 1) == nShardPerBlock) {
                 // 先检查最终文件是否已存在（可能被其他 shard 提前提交）
                 std::string finalPath = layout_->DataFilePath(blockId, false);
                 if (LustreFile::Exists(finalPath)) {
@@ -421,7 +444,7 @@ Status TransQueue::H2SAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
             }
 
             UC_DEBUG("LustreTransQueue::H2SAsync - Shard {}/{} async write completed",
-                     currentShard, totalShards);
+                     ios->currentShard, ios->totalShards);
 
             ios->MarkCompleted(Status::OK());
             if (ios->waiter) { ios->waiter->Done(); }
@@ -433,7 +456,8 @@ Status TransQueue::H2SAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
         // 回退到同步 I/O（确保文件正确关闭）
         UC_WARN("Async submit failed, falling back to sync I/O: {}", s.ToString());
         LustreFile fallbackFile(tmpPath);
-        Status openStatus = fallbackFile.Open(O_WRONLY | O_APPEND);
+        // 不使用 O_APPEND，与主路径保持一致
+        Status openStatus = fallbackFile.Open(O_WRONLY);
         if (openStatus.Failure()) {
             UC_ERROR("Failed to open file in fallback mode: {}", openStatus.ToString());
             if (ios->waiter) { ios->waiter->Done(); }
@@ -505,7 +529,8 @@ Status TransQueue::S2H(const std::shared_ptr<ExtendedIoUnit>& ios)
     }
 
     // 4. 读取数据 (同步或异步)
-    if (ios->dstAddr != nullptr && ios->ioSize > 0) {
+    // 修复: 检查 dstAddrs 数组而非单个 dstAddr
+    if (!ios->dstAddrs.empty() && ios->ioSize > 0) {
         if (enableAsyncIo_ && asyncIo_) {
             // P2: 异步 I/O 路径 - 传递 shared_ptr 保持文件打开状态
             return S2HAsync(ios, finalPath, file);
@@ -514,8 +539,8 @@ Status TransQueue::S2H(const std::shared_ptr<ExtendedIoUnit>& ios)
             return S2HSync(ios, finalPath, *file);
         }
     } else {
-        UC_WARN("LustreTransQueue::S2H - Skipping read: dstAddr={}, ioSize={}",
-                fmt::ptr(ios->dstAddr), ios->ioSize);
+        UC_WARN("LustreTransQueue::S2H - Skipping read: dstAddrs.size={}, ioSize={}",
+                ios->dstAddrs.size(), ios->ioSize);
         ios->MarkCompleted(Status::OK());
         if (ios->waiter) { ios->waiter->Done(); }
         return Status::OK();
@@ -525,14 +550,24 @@ Status TransQueue::S2H(const std::shared_ptr<ExtendedIoUnit>& ios)
 // P2: 同步 S2H 实现 (保持原有逻辑)
 Status TransQueue::S2HSync(const std::shared_ptr<ExtendedIoUnit>& ios, const std::string& finalPath, LustreFile& file)
 {
-    // 读取数据 (使用 pread 支持并发读取不同偏移)
-    Status status = file.Read(ios->dstAddr, ios->ioSize, ios->fileOffset);
-    if (status.Failure()) {
-        UC_ERROR("LustreTransQueue::S2HSync - Read failed: {}", status.ToString());
-        file.Close();
-        if (ios->waiter) { ios->waiter->Done(); }
-        failureSet_->Insert(ios->owner);
-        return status;
+    // 修复: 遍历所有地址读取数据 (与 PosixStore 保持一致)
+    size_t offset = ios->fileOffset;
+    for (const auto& addr : ios->dstAddrs) {
+        if (addr == nullptr || ios->ioSize == 0) {
+            UC_WARN("LustreTransQueue::S2HSync - Skipping read: addr={}, ioSize={}",
+                    fmt::ptr(addr), ios->ioSize);
+            continue;
+        }
+        
+        Status status = file.Read(addr, ios->ioSize, offset);
+        if (status.Failure()) {
+            UC_ERROR("LustreTransQueue::S2HSync - Read failed at offset {}: {}", offset, status.ToString());
+            file.Close();
+            if (ios->waiter) { ios->waiter->Done(); }
+            failureSet_->Insert(ios->owner);
+            return status;
+        }
+        offset += ios->ioSize;
     }
 
     UC_DEBUG("LustreTransQueue::S2HSync - Shard {} read completed", ios->shardIndex);
@@ -548,6 +583,24 @@ Status TransQueue::S2HAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
                              const std::string& finalPath,
                              const std::shared_ptr<LustreFile>& file)
 {
+    // 修复: 当有多个地址时，使用同步 I/O 遍历读取
+    // 异步 I/O 当前只支持单个地址，多个地址时回退到同步
+    if (ios->dstAddrs.size() > 1) {
+        UC_DEBUG("LustreTransQueue::S2HAsync - Multiple addresses ({}), using sync I/O", 
+                 ios->dstAddrs.size());
+        return S2HSync(ios, finalPath, *file);
+    }
+    
+    // 单个地址时，使用异步 I/O
+    if (ios->dstAddrs.empty() || ios->dstAddrs[0] == nullptr) {
+        UC_WARN("LustreTransQueue::S2HAsync - No valid address, skipping");
+        ios->MarkCompleted(Status::OK());
+        if (ios->waiter) { ios->waiter->Done(); }
+        return Status::OK();
+    }
+    
+    void* dstAddr = ios->dstAddrs[0];
+    
     // 提交异步读请求
     // 修复 C1/C3: 捕获必要的值和 shared_ptr 确保生命周期安全
     int fd = file->GetFd();
@@ -559,7 +612,7 @@ Status TransQueue::S2HAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
 
     IoRequest req(
         fd,
-        ios->dstAddr,
+        dstAddr,  // 使用局部变量
         ios->ioSize,
         static_cast<off64_t>(ios->fileOffset),
         false,  // isWrite = false (读)

@@ -55,8 +55,10 @@ private:
         // ===== IoUnit 核心字段 =====
         Detail::BlockId blockId;
         size_t shardIndex;
-        void* srcAddr{nullptr};
-        void* dstAddr{nullptr};
+        std::vector<void*> srcAddrs;   // 修复: 保存所有地址 (与 PosixStore 保持一致)
+        std::vector<void*> dstAddrs;   // 修复: 保存所有地址 (与 PosixStore 保持一致)
+        void* srcAddr{nullptr};        // 兼容旧代码 (第一个地址)
+        void* dstAddr{nullptr};        // 兼容旧代码 (第一个地址)
         size_t fileOffset{0};
         size_t ioSize{0};
         std::atomic<bool> completed{false};
@@ -79,10 +81,13 @@ private:
 
         // 便捷构造函数
         ExtendedIoUnit(const Detail::BlockId& bid, size_t sidx,
-                       void* src, void* dst, size_t offset, size_t size,
+                       const std::vector<void*>& srcs, const std::vector<void*>& dsts,
+                       size_t offset, size_t size,
                        Detail::TaskHandle ownerId, TransTask::Type t,
                        std::shared_ptr<Latch> w, size_t totalShards = 1, size_t currentShard = 0)
-            : blockId(bid), shardIndex(sidx), srcAddr(src), dstAddr(dst),
+            : blockId(bid), shardIndex(sidx), srcAddrs(srcs), dstAddrs(dsts),
+              srcAddr(srcs.empty() ? nullptr : srcs[0]),
+              dstAddr(dsts.empty() ? nullptr : dsts[0]),
               fileOffset(offset), ioSize(size), owner(ownerId), type(t), waiter(w),
               totalShards(totalShards), currentShard(currentShard) {}
 
@@ -112,9 +117,9 @@ private:
             }
         }
 
-        // P1-1.2: 判断是否是最后一个 Shard
-        bool IsLastShard() const noexcept {
-            return currentShard == totalShards - 1;
+        // P1-1.2: 判断是否是最后一个 Shard (基于 shardIndex，与 PosixStore 保持一致)
+        bool IsLastShardByIndex(size_t nShardPerBlock) const noexcept {
+            return (shardIndex + 1) == nShardPerBlock;
         }
 
         // 创建 weak_ptr 用于回调捕获 (修复循环引用问题)
