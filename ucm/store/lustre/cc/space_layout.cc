@@ -216,26 +216,24 @@ Status SpaceLayout::CommitFile(const Detail::BlockId& blockId, bool success) con
         return Status::OsApiError("Operation failed, temp file removed");
     }
 
-    // 成功: 使用 link() 原子提交 (v1.1 设计)
+    // 成功: 使用 rename() 重命名临时文件为正式文件 (与 PosixStore 保持一致)
     std::string tmpPath = DataFilePath(blockId, true);
     std::string finalPath = DataFilePath(blockId, false);
 
-    UC_DEBUG("LustreSpaceLayout::CommitFile - Linking {} -> {}", tmpPath, finalPath);
+    UC_DEBUG("LustreSpaceLayout::CommitFile - Renaming {} -> {}", tmpPath, finalPath);
 
-    // 使用 link() 创建硬链接 (原子操作)
-    auto linkResult = LustreFile::Link(tmpPath, finalPath);
+    // 使用 rename() 重命名文件 (原子操作)
+    // 与 PosixStore 保持一致：创建临时文件对象并调用 Rename
+    LustreFile tmpFile(tmpPath);
+    auto renameResult = tmpFile.Rename(finalPath);
 
-    if (linkResult.Success()) {
-        // 成功: 删除临时文件
-        if (auto s = LustreFile::Remove(tmpPath); s.Failure()) {
-            UC_WARN("LustreSpaceLayout::CommitFile - Failed to remove temp file after commit: {}", s.ToString());
-        }
+    if (renameResult.Success()) {
         UC_INFO("LustreSpaceLayout::CommitFile - Commit succeeded: {} -> {}", tmpPath, finalPath);
         return Status::OK();
     }
 
-    if (linkResult.Underlying() == Status::DuplicateKey().Underlying()) {
-        // 文件已存在: 其他进程已经提交 (幂等性保证)
+    if (renameResult.Underlying() == Status::DuplicateKey().Underlying()) {
+        // 文件已存在: 其他 shard 已经提交 (幂等性保证)
         if (auto s = LustreFile::Remove(tmpPath); s.Failure()) {
             UC_WARN("LustreSpaceLayout::CommitFile - Failed to remove temp file: {}", s.ToString());
         }
@@ -244,8 +242,8 @@ Status SpaceLayout::CommitFile(const Detail::BlockId& blockId, bool success) con
     }
 
     // 其他错误
-    UC_ERROR("LustreSpaceLayout::CommitFile - link() failed: {}", linkResult.ToString());
-    return linkResult;
+    UC_ERROR("LustreSpaceLayout::CommitFile - rename() failed: {}", renameResult.ToString());
+    return renameResult;
 }
 
 std::vector<std::string> SpaceLayout::RelativeRoots() const
