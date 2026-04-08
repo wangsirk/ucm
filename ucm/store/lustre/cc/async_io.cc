@@ -127,7 +127,7 @@ struct ThreadPoolBackend::Impl {
         if (rc != 0) {
             UC_WARN("Failed to set CPU affinity to CPU {}: {}", cpuId, strerror(rc));
         } else {
-            UC_DEBUG("Worker thread bound to CPU {}", cpuId);
+            UC_INFO("Worker thread bound to CPU {}", cpuId);
         }
     }
 
@@ -293,18 +293,34 @@ Status ThreadPoolBackend::SubmitWrite(const IoRequest& req)
 
 Status ThreadPoolBackend::SubmitIo(const IoRequest& req)
 {
-    {
-        std::lock_guard<std::mutex> lock(impl_->queueMutex);
+    // 队列满时等待的最大时间 (ms)
+    // 注意：如果队列持续满，调用线程最多阻塞这么久
+    constexpr int kSubmitTimeoutMs = 1000;
 
-        // 检查队列是否已满
-        if (impl_->requestQueue.size() >= queueDepth_) {
-            UC_WARN("ThreadPoolBackend queue full (size >= {})", queueDepth_);
-            // 同步执行作为回退
-            ssize_t result = Impl::ExecuteSyncIo(req);
-            if (result < 0) {
-                return Status::OsApiError("I/O failed in fallback mode");
+    {
+        std::unique_lock<std::mutex> lock(impl_->queueMutex);
+
+        // P0 修复：队列满时使用条件变量等待，而不是回退到同步执行
+        // 这样可以保持异步 I/O 语义的一致性
+        if (queueDepth_ > 0) {
+            auto wait_result = impl_->queueCV.wait_for(
+                lock,
+                std::chrono::milliseconds(kSubmitTimeoutMs),
+                [this] {
+                    return impl_->requestQueue.size() < queueDepth_ || !impl_->running.load();
+                }
+            );
+
+            if (!wait_result) {
+                // 超时，说明队列持续满
+                UC_WARN("ThreadPoolBackend queue full, submit timeout after {}ms (queue size >= {})",
+                        kSubmitTimeoutMs, queueDepth_);
+                return Status::Retry();
             }
-            return Status::OK();
+
+            if (!impl_->running.load()) {
+                return Status::Error("ThreadPoolBackend is stopping");
+            }
         }
 
         impl_->requestQueue.push(req);
@@ -321,19 +337,20 @@ size_t ThreadPoolBackend::ProcessCompletion(int timeoutMs)
 {
     std::unique_lock<std::mutex> lock(impl_->completionMutex);
 
-    // 如果 timeoutMs > 0，等待指定时间或直到有完成事件
-    if (timeoutMs > 0 && impl_->completionQueue.empty()) {
-        if (timeoutMs == -1) {
-            // 无限等待
-            impl_->completionCV.wait(lock, [this] {
-                return !impl_->completionQueue.empty();
-            });
-        } else {
-            // 超时等待
-            impl_->completionCV.wait_for(lock, std::chrono::milliseconds(timeoutMs), [this] {
-                return !impl_->completionQueue.empty();
-            });
-        }
+    // P1 修复: 条件判断顺序修正
+    // - timeoutMs == -1: 无限等待直到有完成事件
+    // - timeoutMs > 0: 超时等待
+    // - timeoutMs == 0: 非阻塞，立即返回
+    if (timeoutMs == -1) {
+        // 无限等待
+        impl_->completionCV.wait(lock, [this] {
+            return !impl_->completionQueue.empty();
+        });
+    } else if (timeoutMs > 0 && impl_->completionQueue.empty()) {
+        // 超时等待
+        impl_->completionCV.wait_for(lock, std::chrono::milliseconds(timeoutMs), [this] {
+            return !impl_->completionQueue.empty();
+        });
     }
 
     size_t processed = 0;

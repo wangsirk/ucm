@@ -328,8 +328,10 @@ Status TransQueue::H2SSync(const std::shared_ptr<ExtendedIoUnit>& ios, const std
         offset += ios->ioSize;
     }
 
-    // 如果是最后一个 Shard，提交文件 (与 PosixStore 保持一致：基于 shardIndex 和 nShardPerBlock_ 判断)
-    if ((ios->shardIndex + 1) == nShardPerBlock_) {
+    // 如果是最后一个 Shard，提交文件 (与 PosixStore 保持一致)
+    // 修复：使用 currentShard (per-block index) 和 totalShards (actual count per block)
+    // 而不是 shardIndex (global index) 和 nShardPerBlock_ (configured constant)
+    if ((ios->currentShard + 1) == ios->totalShards) {
         // 确保数据写入磁盘后再提交
         Status syncStatus = file.Sync();
         if (syncStatus.Failure()) {
@@ -403,7 +405,7 @@ Status TransQueue::H2SAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
         ios->ioSize,
         static_cast<off64_t>(ios->fileOffset),
         true,  // isWrite
-        [this, weakIos, tmpPath, blockId, file, nShardPerBlock = nShardPerBlock_](IoRequest::Result result, ssize_t bytesTransferred) {
+        [this, weakIos, tmpPath, blockId, file](IoRequest::Result result, ssize_t bytesTransferred) {
             // 尝试获取 shared_ptr，如果对象已被销毁则跳过
             auto ios = weakIos.lock();
             if (!ios) {
@@ -420,8 +422,9 @@ Status TransQueue::H2SAsync(const std::shared_ptr<ExtendedIoUnit>& ios,
             }
 
             // 写入成功，如果是最后一个 Shard（按索引），提交文件
-            // 与 PosixStore 保持一致：基于 shardIndex 和 nShardPerBlock 判断
-            if ((ios->shardIndex + 1) == nShardPerBlock) {
+            // 修复：使用 currentShard (per-block index) 和 totalShards (actual count per block)
+            // 而不是 shardIndex (global index) 和 nShardPerBlock (configured constant)
+            if ((ios->currentShard + 1) == ios->totalShards) {
                 // 先检查最终文件是否已存在（可能被其他 shard 提前提交）
                 std::string finalPath = layout_->DataFilePath(blockId, false);
                 if (LustreFile::Exists(finalPath)) {
