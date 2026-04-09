@@ -277,10 +277,6 @@ Status LustreFile::SetStripedDirectory(const std::string& path,
         return MkDir(path, mode);
     }
 
-    // 路径格式说明: 函数期望 path 格式为 "{parent}/data"
-    // 条带属性将设置在父目录上，data 子目录继承该属性
-    // 如果路径不符合此格式，则直接在给定路径上设置条带属性
-
     std::string targetPath;  // 设置条带属性的目标目录
     std::string dataPath;    // 最终创建的 data 目录路径
 

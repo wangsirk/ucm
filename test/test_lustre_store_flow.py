@@ -48,9 +48,9 @@ def test_lustre_store_creation():
     config = {
         "storage_backends": ["/mnt/lustre47/demo"],  # Lustre 客户端存储路径
         "device_id": -1,  # CPU only
-        "block_size": 512,
-        "tensor_size": 512,
-        "shard_size": 512,
+        "block_size": 2048,
+        "tensor_size": 2048,
+        "shard_size": 2048,
         "data_dir_shard_bytes": 1,  # 创建 16 个分片目录 (0-f)
         "stripe_count": 2,  # 启用条带化，2个OST
         "stripe_size": 1048576,  # 1MB 条带大小
@@ -59,17 +59,21 @@ def test_lustre_store_creation():
     try:
         store = UcmConnectorFactoryV1.create_connector("UcmLustreStore", config)
         print(f"✅ Store 创建成功: {store}")
-        return store
+        return store, config
     except Exception as e:
         print(f"❌ Store 创建失败: {e}")
-        return None
+        return None, None
 
 
-def run_lustre_store_flow_test(store):
+def run_lustre_store_flow_test(store, config):
     """测试 Lustre Store 的完整流程：lookup -> load -> dump"""
     print("\n" + "=" * 60)
     print("步骤3: 测试 Lustre Store 流程 (lookup/load/dump)")
     print("=" * 60)
+    
+    # 从配置中获取 tensor_size
+    tensor_size = config.get("tensor_size", 512)
+    print(f"使用 tensor_size: {tensor_size}")
     
     # 模拟 block_ids (token 对应的 block hash)
     # 使用与单元测试相同的方式生成 16 字节 BlockId
@@ -97,8 +101,9 @@ def run_lustre_store_flow_test(store):
     # 测试 dump (模拟将 token 数据写入存储)
     print("\n--- 测试 dump ---")
     # 创建模拟的 tensor 数据 (1D uint8 tensor)
+    # 使用配置中的 tensor_size 而不是硬编码 512
     import numpy as np
-    dummy_tensor = [[torch.from_numpy(np.frombuffer(bytes([0xAA] * 512), dtype=np.uint8).copy())] for _ in range(len(block_ids))]
+    dummy_tensor = [[torch.from_numpy(np.frombuffer(bytes([0xAA] * tensor_size), dtype=np.uint8).copy())] for _ in range(len(block_ids))]
 
     # 打印写入前的数据
     print("\n📝 写入前的数据:")
@@ -118,8 +123,8 @@ def run_lustre_store_flow_test(store):
 
     # 测试 load (模拟从存储读取 token 数据)
     print("\n--- 测试 load ---")
-    # 初始化目标 tensor 为全0
-    dst_tensor = [[torch.from_numpy(np.frombuffer(bytes([0x00] * 512), dtype=np.uint8).copy())] for _ in range(len(block_ids))]
+    # 初始化目标 tensor 为全0，使用配置中的 tensor_size
+    dst_tensor = [[torch.from_numpy(np.frombuffer(bytes([0x00] * tensor_size), dtype=np.uint8).copy())] for _ in range(len(block_ids))]
 
     # 打印读取前的数据 (应该是全0)
     print("\n📖 读取前的数据 (预期全0):")
@@ -157,12 +162,12 @@ def main():
     results.append(("注册检查", test_lustre_store_registration()))
     
     # 测试2: 创建实例
-    store = test_lustre_store_creation()
+    store, config = test_lustre_store_creation()
     results.append(("实例创建", store is not None))
     
     # 测试3: 流程测试
     if store:
-        results.append(("流程测试", run_lustre_store_flow_test(store)))
+        results.append(("流程测试", run_lustre_store_flow_test(store, config)))
 
     # 汇总结果
     print("\n" + "=" * 60)

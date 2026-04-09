@@ -23,8 +23,6 @@
  */
 #include "space_manager.h"
 #include "logger/logger.h"
-#include <thread>
-#include <future>
 #include <algorithm>
 
 namespace UC::LustreStore {
@@ -32,13 +30,47 @@ namespace UC::LustreStore {
 Status SpaceManager::Setup(const Config& config)
 {
     UC_INFO("LustreSpaceManager::Setup - Initializing space manager");
-    // TODO: 实现空间管理器初始化
+    
+    // 初始化空间布局
     auto s = layout_.Setup(config);
     if (s.Failure()) {
         UC_ERROR("LustreSpaceManager::Setup - Failed to setup layout: {}", s);
         return s;
     }
-    UC_INFO("LustreSpaceManager::Setup - Space manager initialized successfully");
+    
+    // P2 优化：初始化 Lookup 线程池
+    lookupConcurrency_ = config.lookupConcurrency;
+    
+    ThreadPoolConfig poolConfig;
+    poolConfig.lookupConcurrency = config.lookupConcurrency;
+    poolConfig.dataTransConcurrency = 1;  // SpaceManager 只需要 Lookup 线程池
+    poolConfig.lookupCpuCores = config.lookupCpuCores;
+    poolConfig.dataTransCpuCores = -2;  // 不绑定 DataTrans 线程池
+    poolConfig.queueDepth = 1024;  // 足够大的队列深度
+    poolConfig.timeoutMs = config.timeoutMs;
+    
+    // 验证配置
+    s = poolConfig.Validate();
+    if (s.Failure()) {
+        UC_ERROR("LustreSpaceManager::Setup - Invalid thread pool config: {}", s);
+        return s;
+    }
+    
+    // 创建并初始化线程池
+    try {
+        threadPool_ = std::make_unique<LustreThreadPool>();
+        s = threadPool_->Setup(poolConfig);
+        if (s.Failure()) {
+            UC_ERROR("LustreSpaceManager::Setup - Failed to setup thread pool: {}", s);
+            return s;
+        }
+    } catch (const std::exception& e) {
+        UC_ERROR("LustreSpaceManager::Setup - Exception creating thread pool: {}", e.what());
+        return Status::Error(std::string("Failed to create thread pool: ") + e.what());
+    }
+    
+    UC_INFO("LustreSpaceManager::Setup - Space manager initialized successfully "
+            "(lookup_concurrency={})", lookupConcurrency_);
     return Status::OK();
 }
 
@@ -49,41 +81,37 @@ std::vector<uint8_t> SpaceManager::Lookup(const Detail::BlockId* blocks, size_t 
 
     // P1 修复: 使用多线程并行查询，避免 N+1 syscall 问题
     // 小数量直接顺序查询，避免线程开销
-    if (num <= 4) {
+    if (num <= 4 || !threadPool_) {
         for (size_t i = 0; i < num; i++) {
             result[i] = LookupSingle(&blocks[i]);
         }
     } else {
-        // 使用线程池并行查询
-        // 确定线程数量：使用硬件并发数，但限制最大线程数
-        size_t hwConcurrency = std::thread::hardware_concurrency();
-        if (hwConcurrency == 0) {
-            hwConcurrency = 4;  // 防止 hardware_concurrency 返回 0
-        }
-        size_t numThreads = std::min(num, hwConcurrency);
-        size_t blocksPerThread = (num + numThreads - 1) / numThreads;
-
-        std::vector<std::future<void>> futures;
-        futures.reserve(numThreads);
-
-        for (size_t t = 0; t < numThreads; ++t) {
-            size_t start = t * blocksPerThread;
-            size_t end = std::min(start + blocksPerThread, num);
-            if (start >= num) {
-                break;
+        // P2 优化：使用 LustreThreadPool 统一管理线程
+        // 使用 Latch 等待所有任务完成
+        auto latch = std::make_shared<Latch>();
+        latch->Set(num);
+        
+        // 为每个 block 提交一个查询任务
+        for (size_t i = 0; i < num; ++i) {
+            // 注意：捕获 i 而不是 &i，避免引用失效
+            auto task = [this, &blocks, &result, i, latch]() {
+                result[i] = LookupSingle(&blocks[i]);
+                latch->Done();
+            };
+            
+            Status s = threadPool_->SubmitFunc(std::move(task), 
+                                                LustreThreadPool::WorkerType::LOOKUP);
+            if (s.Failure()) {
+                // 提交失败，回退到同步查询
+                UC_WARN("LustreSpaceManager::Lookup - Failed to submit task: {}, "
+                        "falling back to sync", s.ToString());
+                result[i] = LookupSingle(&blocks[i]);
+                latch->Done();
             }
-
-            futures.push_back(std::async(std::launch::async, [this, &blocks, &result, start, end]() {
-                for (size_t i = start; i < end; ++i) {
-                    result[i] = LookupSingle(&blocks[i]);
-                }
-            }));
         }
-
-        // 等待所有线程完成
-        for (auto& f : futures) {
-            f.get();
-        }
+        
+        // 等待所有任务完成
+        latch->Wait();
     }
 
     size_t foundCount = std::count(result.begin(), result.end(), 1);

@@ -175,7 +175,7 @@ private:
         if (rc != 0) {
             UC_WARN("Failed to set CPU affinity to CPU {}: {}", cpuId, strerror(rc));
         } else {
-            UC_DEBUG("Worker thread bound to CPU {}", cpuId);
+            UC_INFO("Worker thread bound to CPU {}", cpuId);
         }
     }
 
@@ -187,7 +187,7 @@ private:
         // 设置 CPU 亲和性
         SetCpuAffinity(cpuId);
 
-        UC_DEBUG("{} worker {} started (CPU affinity: {})", name_, workerId, cpuId);
+        UC_INFO("{} worker {} started (CPU affinity: {})", name_, workerId, cpuId);
 
         while (running_.load()) {
             std::unique_ptr<Task> task;

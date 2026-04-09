@@ -26,6 +26,9 @@
 
 #include "global_config.h"
 #include "space_layout.h"
+#include "lustre_thread_pool.h"
+#include "thread/latch.h"
+#include <memory>
 
 namespace UC::LustreStore {
 
@@ -34,9 +37,13 @@ namespace UC::LustreStore {
  * 
  * 提供并发的Block查找能力
  * 未来将支持Lustre特有的OST感知查找优化
+ * 
+ * P2 优化：统一使用 LustreThreadPool 进行并发查询
  */
 class SpaceManager {
     SpaceLayout layout_;
+    std::unique_ptr<LustreThreadPool> threadPool_;
+    size_t lookupConcurrency_{8};
 
 public:
     /**
